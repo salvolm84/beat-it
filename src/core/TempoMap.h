@@ -18,6 +18,9 @@ struct AnalysisResult
     /** Beats from BTrack (forward + backward pass stitched), in seconds. */
     std::vector<double> rawBeats;
 
+    /** The individual BTrack passes (kept for diagnostics). */
+    std::vector<double> forwardBeats, backwardBeats;
+
     /** High-resolution onset strength (spectral flux), used for snapping
         beats to transients. Sample n is at time odfTimeOffset + n * odfHop. */
     std::vector<float> odf;

@@ -33,6 +33,11 @@ public:
                                                   double sampleRate,
                                                   ProgressFn progress = {});
 
+    /** Combines the forward and backward tracker passes (see BeatAnalyzer.cpp). */
+    static std::vector<double> mergePasses (const std::vector<double>& forward,
+                                            const std::vector<double>& backward,
+                                            const AnalysisResult& analysis);
+
     /** Mono mixdown resampled to 44.1 kHz (libsamplerate). */
     static std::vector<double> prepareMono (const juce::AudioBuffer<float>& audio, double sampleRate);
 };

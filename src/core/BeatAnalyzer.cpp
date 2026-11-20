@@ -141,143 +141,192 @@ namespace
         return beats;
     }
 
-    float peakOdfNear (const AnalysisResult& a, double t, double halfWidth)
+
+}
+
+//==============================================================================
+/** Merges the forward and backward BTrack passes.
+
+    A causal tracker lags behind tempo ramps and needs a few seconds to
+    re-lock after an abrupt tempo change or at the song start; the
+    backward pass has the same weaknesses mirrored in time. So we pool the
+    beats of both passes as candidates and pick, with dynamic programming,
+    the sequence that maximises onset strength while penalising irregular
+    consecutive intervals. The path can switch passes anywhere, taking
+    whichever one is locked in each section.
+
+    Intervals are also compared to the local beat period that each pass
+    reports on its own. Without that term, two passes locked half a beat
+    apart (one on the offbeats) interleave into a perfectly regular
+    sequence at double tempo. */
+std::vector<double> BeatAnalyzer::mergePasses (const std::vector<double>& fwd, const std::vector<double>& bwd,
+                                           const AnalysisResult& a)
+{
+    if (bwd.size() < 8) return fwd;
+    if (fwd.size() < 8) return bwd;
+
+    struct Cand { double t; int mask; double s; };
+    std::vector<Cand> cands;
     {
-        if (a.odf.empty())
-            return 0.0f;
+        std::vector<std::pair<double, int>> all;
+        for (double t : fwd) all.push_back ({ t, 1 });
+        for (double t : bwd) all.push_back ({ t, 2 });
+        std::sort (all.begin(), all.end());
 
-        const int n = (int) a.odf.size();
-        const int lo = std::max (0, (int) std::floor ((t - halfWidth - a.odfTimeOffset) / a.odfHop));
-        const int hi = std::min (n - 1, (int) std::ceil ((t + halfWidth - a.odfTimeOffset) / a.odfHop));
-
-        float m = 0.0f;
-        for (int i = lo; i <= hi; ++i)
-            m = std::max (m, a.odf[(size_t) i]);
-        return m;
+        for (auto [t, m] : all)
+        {
+            if (! cands.empty() && t - cands.back().t < 0.03 && (cands.back().mask & m) == 0)
+            {
+                cands.back().t = 0.5 * (cands.back().t + t);
+                cands.back().mask |= m;
+            }
+            else
+            {
+                cands.push_back ({ t, m, 0.0 });
+            }
+        }
     }
 
-    /** Merges the forward and backward BTrack passes.
-
-        A causal tracker lags behind tempo ramps and needs a few seconds to
-        re-lock after an abrupt tempo change or at the song start; the
-        backward pass has the same weaknesses mirrored in time. So we pool the
-        beats of both passes as candidates and pick, with dynamic programming,
-        the sequence that maximises onset strength while penalising irregular
-        consecutive intervals. The path can switch passes anywhere, taking
-        whichever one is locked in each section. */
-    std::vector<double> mergePasses (const std::vector<double>& fwd, const std::vector<double>& bwd,
-                                     const AnalysisResult& a)
+    // onset strength of each candidate, normalised by the median
+    std::vector<double> peaks;
+    for (auto& c : cands)
     {
-        if (bwd.size() < 8) return fwd;
-        if (fwd.size() < 8) return bwd;
-
-        struct Cand { double t; int mask; double s; };
-        std::vector<Cand> cands;
-        {
-            std::vector<std::pair<double, int>> all;
-            for (double t : fwd) all.push_back ({ t, 1 });
-            for (double t : bwd) all.push_back ({ t, 2 });
-            std::sort (all.begin(), all.end());
-
-            for (auto [t, m] : all)
-            {
-                if (! cands.empty() && t - cands.back().t < 0.03 && (cands.back().mask & m) == 0)
-                {
-                    cands.back().t = 0.5 * (cands.back().t + t);
-                    cands.back().mask |= m;
-                }
-                else
-                {
-                    cands.push_back ({ t, m, 0.0 });
-                }
-            }
-        }
-
-        // onset strength of each candidate, normalised by the median
-        std::vector<double> peaks;
-        for (auto& c : cands)
-        {
-            c.s = peakOdfNear (a, c.t, 0.035);
-            peaks.push_back (c.s);
-        }
-
-        std::nth_element (peaks.begin(), peaks.begin() + (long) peaks.size() / 2, peaks.end());
-        const double median = std::max (1.0e-9, peaks[peaks.size() / 2]);
-
-        for (auto& c : cands)
-            c.s = std::min (3.0, c.s / median) + (c.mask == 3 ? 0.5 : 0.0); // bonus when both passes agree
-
-        // DP over pairs (previous beat, current beat) so that the transition
-        // cost can compare consecutive intervals (second-order smoothness).
-        constexpr double minInterval = 0.2, maxInterval = 1.6; // 300 .. 37.5 BPM
-        constexpr double lambda = 4.0;
-
-        const int m = (int) cands.size();
-        std::vector<std::vector<int>> preds ((size_t) m);
-        for (int j = 0; j < m; ++j)
-            for (int i = j - 1; i >= 0; --i)
-            {
-                const double d = cands[(size_t) j].t - cands[(size_t) i].t;
-                if (d > maxInterval) break;
-                if (d >= minInterval) preds[(size_t) j].push_back (i);
-            }
-
-        // score[j][k] = best path ending with beats (preds[j][k], j)
-        std::vector<std::vector<double>> score ((size_t) m);
-        std::vector<std::vector<int>> back ((size_t) m);   // index into preds[i] of the beat before i, or -1
-
-        for (int j = 0; j < m; ++j)
-        {
-            const auto& pj = preds[(size_t) j];
-            score[(size_t) j].assign (pj.size(), 0.0);
-            back[(size_t) j].assign (pj.size(), -1);
-
-            for (size_t k = 0; k < pj.size(); ++k)
-            {
-                const int i = pj[k];
-                const double dij = cands[(size_t) j].t - cands[(size_t) i].t;
-
-                double best = cands[(size_t) i].s;  // path starting at i
-                int bestH = -1;
-
-                const auto& pi = preds[(size_t) i];
-                for (size_t q = 0; q < pi.size(); ++q)
-                {
-                    const double dhi = cands[(size_t) i].t - cands[(size_t) pi[q]].t;
-                    const double r = std::log (dij / dhi);
-                    const double v = score[(size_t) i][q] - lambda * r * r;
-                    if (v > best) { best = v; bestH = (int) q; }
-                }
-
-                score[(size_t) j][k] = best + cands[(size_t) j].s;
-                back[(size_t) j][k] = bestH;
-            }
-        }
-
-        // best end state
-        int endJ = -1, endK = -1;
-        double bestScore = -1.0e300;
-        for (int j = 0; j < m; ++j)
-            for (size_t k = 0; k < score[(size_t) j].size(); ++k)
-                if (score[(size_t) j][k] > bestScore) { bestScore = score[(size_t) j][k]; endJ = j; endK = (int) k; }
-
-        if (endJ < 0)
-            return fwd;
-
-        std::vector<double> out;
-        int j = endJ, k = endK;
-        out.push_back (cands[(size_t) j].t);
-        while (k >= 0)
-        {
-            const int i = preds[(size_t) j][(size_t) k];
-            out.push_back (cands[(size_t) i].t);
-            k = back[(size_t) j][(size_t) k];
-            j = i;
-        }
-
-        std::reverse (out.begin(), out.end());
-        return out;
+        c.s = a.peakOdfNear (c.t, 0.035);
+        peaks.push_back (c.s);
     }
+
+    std::nth_element (peaks.begin(), peaks.begin() + (long) peaks.size() / 2, peaks.end());
+    const double median = std::max (1.0e-9, peaks[peaks.size() / 2]);
+
+    for (auto& c : cands)
+        c.s = std::min (3.0, c.s / median) + (c.mask == 3 ? 0.5 : 0.0); // bonus when both passes agree
+
+    // DP over pairs (previous beat, current beat) so that the transition
+    // cost can compare consecutive intervals (second-order smoothness).
+    constexpr double minInterval = 0.2, maxInterval = 1.6; // 300 .. 37.5 BPM
+    constexpr double lambda = 4.0;      // weight of interval-to-interval smoothness
+    constexpr double lambdaTempo = 4.0; // weight of agreement with the passes' own tempo
+    constexpr double lambdaGlobal = 2.0; // weight of agreement with the song's overall tempo
+
+    // local beat period of a pass around time t: median interval within +-3 s
+    auto localPeriod = [] (const std::vector<double>& beats, double t)
+    {
+        auto lo = std::lower_bound (beats.begin(), beats.end(), t - 3.0);
+        auto hi = std::upper_bound (beats.begin(), beats.end(), t + 3.0);
+        std::vector<double> d;
+        for (auto it = lo; it != hi && it + 1 != beats.end(); ++it)
+            if (*(it + 1) <= t + 3.0)
+                d.push_back (*(it + 1) - *it);
+        if (d.size() < 2)
+            return 0.0;
+        std::nth_element (d.begin(), d.begin() + (long) d.size() / 2, d.end());
+        return d[d.size() / 2];
+    };
+
+    const int numCands = (int) cands.size();
+    std::vector<double> refFwd ((size_t) numCands), refBwd ((size_t) numCands);
+    for (int j = 0; j < numCands; ++j)
+    {
+        refFwd[(size_t) j] = localPeriod (fwd, cands[(size_t) j].t);
+        refBwd[(size_t) j] = localPeriod (bwd, cands[(size_t) j].t);
+    }
+
+    // Overall beat period, from both passes. When the passes disagree by an
+    // octave somewhere (typically one pass counting eighth notes during an
+    // intro), this decides which one to follow; real tempo changes are
+    // unaffected because there both passes agree and no alternative exists.
+    double globalPeriod = 0.0;
+    {
+        std::vector<double> d;
+        for (const auto* pass : { &fwd, &bwd })
+            for (size_t i = 1; i < pass->size(); ++i)
+                d.push_back ((*pass)[i] - (*pass)[i - 1]);
+        std::nth_element (d.begin(), d.begin() + (long) d.size() / 2, d.end());
+        globalPeriod = d[d.size() / 2];
+    }
+
+    // cost of an interval ending at candidate j: distance (in log tempo)
+    // to the closer of the two passes' local periods, plus to the global period
+    auto tempoCost = [&] (int j, double interval)
+    {
+        const double g = std::log (interval / globalPeriod);
+        const double globalCost = lambdaGlobal * g * g;
+
+        double best = 1.0e9;
+        for (double ref : { refFwd[(size_t) j], refBwd[(size_t) j] })
+            if (ref > 0.0)
+            {
+                const double r = std::log (interval / ref);
+                best = std::min (best, r * r);
+            }
+        return (best < 1.0e8 ? lambdaTempo * best : 0.0) + globalCost;
+    };
+
+    const int m = (int) cands.size();
+    std::vector<std::vector<int>> preds ((size_t) m);
+    for (int j = 0; j < m; ++j)
+        for (int i = j - 1; i >= 0; --i)
+        {
+            const double d = cands[(size_t) j].t - cands[(size_t) i].t;
+            if (d > maxInterval) break;
+            if (d >= minInterval) preds[(size_t) j].push_back (i);
+        }
+
+    // score[j][k] = best path ending with beats (preds[j][k], j)
+    std::vector<std::vector<double>> score ((size_t) m);
+    std::vector<std::vector<int>> back ((size_t) m);   // index into preds[i] of the beat before i, or -1
+
+    for (int j = 0; j < m; ++j)
+    {
+        const auto& pj = preds[(size_t) j];
+        score[(size_t) j].assign (pj.size(), 0.0);
+        back[(size_t) j].assign (pj.size(), -1);
+
+        for (size_t k = 0; k < pj.size(); ++k)
+        {
+            const int i = pj[k];
+            const double dij = cands[(size_t) j].t - cands[(size_t) i].t;
+
+            double best = cands[(size_t) i].s;  // path starting at i
+            int bestH = -1;
+
+            const auto& pi = preds[(size_t) i];
+            for (size_t q = 0; q < pi.size(); ++q)
+            {
+                const double dhi = cands[(size_t) i].t - cands[(size_t) pi[q]].t;
+                const double r = std::log (dij / dhi);
+                const double v = score[(size_t) i][q] - lambda * r * r;
+                if (v > best) { best = v; bestH = (int) q; }
+            }
+
+            score[(size_t) j][k] = best + cands[(size_t) j].s - tempoCost (j, dij);
+            back[(size_t) j][k] = bestH;
+        }
+    }
+
+    // best end state
+    int endJ = -1, endK = -1;
+    double bestScore = -1.0e300;
+    for (int j = 0; j < m; ++j)
+        for (size_t k = 0; k < score[(size_t) j].size(); ++k)
+            if (score[(size_t) j][k] > bestScore) { bestScore = score[(size_t) j][k]; endJ = j; endK = (int) k; }
+
+    if (endJ < 0)
+        return fwd;
+
+    std::vector<double> out;
+    int j = endJ, k = endK;
+    out.push_back (cands[(size_t) j].t);
+    while (k >= 0)
+    {
+        const int i = preds[(size_t) j][(size_t) k];
+        out.push_back (cands[(size_t) i].t);
+        k = back[(size_t) j][(size_t) k];
+        j = i;
+    }
+
+    std::reverse (out.begin(), out.end());
+    return out;
 }
 
 //==============================================================================
@@ -403,6 +452,8 @@ std::optional<AnalysisResult> BeatAnalyzer::analyze (const juce::AudioBuffer<flo
         return std::nullopt;
 
     result.rawBeats = mergePasses (forward, backward, result);
+    result.forwardBeats = std::move (forward);
+    result.backwardBeats = std::move (backward);
 
     c.report (1.0f);
     return result;

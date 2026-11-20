@@ -352,6 +352,81 @@ void testLayoutEdgeCases()
         check (te <= 3, "constant 120 BPM exports few tempo events (" + juce::String (te) + ")");
     }
 }
+/** Regression: the backward pass locks onto the offbeats for a while (seen on a real
+    song around a breakdown). The merge must not interleave both passes into a
+    double-tempo sequence. */
+void testMergeOffbeatPasses()
+{
+    std::printf ("\n=== merge: passes half a beat apart ===\n");
+
+    for (double offbeatStrength : { 0.6, 1.3 })
+    {
+        AnalysisResult a;
+        a.durationSeconds = 60.0;
+        a.odfHop = 128.0 / 44100.0;
+        a.odfTimeOffset = 0.0;
+        a.odf.assign ((size_t) (60.0 / a.odfHop), 0.05f);
+
+        std::vector<double> truth, fwd, bwd;
+        for (double t = 0.5; t < 59.0; t += 0.5)
+        {
+            truth.push_back (t);
+            a.odf[(size_t) std::lround (t / a.odfHop)] = 1.0f;
+            a.odf[(size_t) std::lround ((t + 0.25) / a.odfHop)] = (float) offbeatStrength;
+        }
+
+        fwd = truth;
+        for (double t : truth)
+            bwd.push_back (t >= 20.0 && t < 35.0 ? t + 0.25 : t);  // offbeat-locked section
+
+        auto merged = BeatAnalyzer::mergePasses (fwd, bwd, a);
+
+        int doubled = 0;
+        for (size_t i = 1; i < merged.size(); ++i)
+            if (merged[i] - merged[i - 1] < 0.4) ++doubled;
+
+        const auto sc = score (truth, merged, 0.07);
+        const bool phaseOk = offbeatStrength > 1.0 || sc.fMeasure > 0.99; // with stronger offbeats either phase is defensible
+        check (doubled == 0 && phaseOk,
+               "offbeat strength " + juce::String (offbeatStrength, 1) + ": " + juce::String ((int) merged.size())
+               + " beats, " + juce::String (doubled) + " doubled intervals, F=" + juce::String (sc.fMeasure, 3));
+    }
+}
+
+/** Regression: one pass counts eighth notes (double tempo) during the intro while
+    the other has the real tempo. The merge must follow the song's overall tempo. */
+void testMergeDoubleTempoIntro()
+{
+    std::printf ("\n=== merge: one pass at double tempo in the intro ===\n");
+
+    AnalysisResult a;
+    a.durationSeconds = 80.0;
+    a.odfHop = 128.0 / 44100.0;
+    a.odf.assign ((size_t) (80.0 / a.odfHop), 0.05f);
+
+    std::vector<double> truth, fwd, bwd;
+    const double period = 60.0 / 82.0;
+    for (double t = 0.5; t < 79.0; t += period)
+    {
+        truth.push_back (t);
+        a.odf[(size_t) std::lround (t / a.odfHop)] = 1.0f;
+        a.odf[(size_t) std::lround ((t + period / 2) / a.odfHop)] = 0.8f; // strong eighth notes
+    }
+
+    for (double t : truth)
+    {
+        fwd.push_back (t);
+        if (t < 15.0) fwd.push_back (t + period / 2);   // forward pass at double tempo in the intro
+    }
+    std::sort (fwd.begin(), fwd.end());
+    bwd = truth;
+
+    auto merged = BeatAnalyzer::mergePasses (fwd, bwd, a);
+    const auto sc = score (truth, merged, 0.07);
+    check (sc.fMeasure > 0.99, "intro follows the real tempo: " + juce::String ((int) merged.size()) + " beats (truth "
+                               + juce::String ((int) truth.size()) + "), F=" + juce::String (sc.fMeasure, 3));
+}
+
 /** Renders the playback engine offline and checks the metronome clicks land on the beats. */
 void testMetronome()
 {
@@ -458,8 +533,64 @@ int compareFiles (const juce::File& refFile, const juce::File& otherFile)
     return std::abs (bestLag) <= 2 && sc.fMeasure > 0.98 ? 0 : 1;
 }
 
+/** --dump file : print the analysis of a real file beat by beat. */
+int dumpFile (const juce::File& file)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (file));
+    if (r == nullptr) { std::printf ("cannot read file\n"); return 1; }
+    juce::AudioBuffer<float> b ((int) r->numChannels, (int) r->lengthInSamples);
+    r->read (&b, 0, (int) r->lengthInSamples, 0, true, true);
+
+    auto res = BeatAnalyzer::analyze (b, r->sampleRate);
+    if (! res) return 1;
+
+    BeatGrid g;
+    g.beats = ops::process (*res, {});
+    g.downbeatOffset = ops::guessDownbeatOffset (g.beats, 4, *res);
+    const auto layout = g.computeLayout();
+
+    auto nearest = [] (const std::vector<double>& v, double t)
+    {
+        double best = 1e9; for (double x : v) if (std::abs (x - t) < std::abs (best)) best = x - t; return best * 1000.0;
+    };
+
+    std::printf ("duration %.2f s, raw %d, fwd %d, bwd %d, final %d beats, avg %.2f BPM, ratio %.3f\n",
+                 res->durationSeconds, (int) res->rawBeats.size(), (int) res->forwardBeats.size(),
+                 (int) res->backwardBeats.size(), (int) g.beats.size(), g.averageBpm(),
+                 ops::alternateBeatStrengthRatio (res->rawBeats, *res));
+    if (juce::SystemStats::getEnvironmentVariable ("BEATIT_PASSES", "").isNotEmpty())
+    {
+        // per-pass local tempo every 5 s
+        auto localBpm = [] (const std::vector<double>& v, double t0, double t1)
+        {
+            int n = 0; double first = 0, last = 0;
+            for (double x : v) if (x >= t0 && x < t1) { if (n == 0) first = x; last = x; ++n; }
+            return n > 1 ? 60.0 * (n - 1) / (last - first) : 0.0;
+        };
+        for (double t = 0; t < res->durationSeconds; t += 5.0)
+            std::printf ("  %6.1f s  fwd %6.1f  bwd %6.1f  merged %6.1f  final %6.1f  rms %.3f\n", t,
+                         localBpm (res->forwardBeats, t, t + 5), localBpm (res->backwardBeats, t, t + 5),
+                         localBpm (res->rawBeats, t, t + 5), localBpm (g.beats, t, t + 5), res->rmsAt (t + 2.5));
+        return 0;
+    }
+    std::printf ("  idx  time      bar.beat  bpm      dFwd(ms) dBwd(ms) odf\n");
+    for (int i = 0; i < (int) g.beats.size(); ++i)
+    {
+        auto [bar, beat] = g.barAndBeatOfDetected (i, layout);
+        std::printf ("  %4d %8.3f  %4d.%d  %7.2f  %+8.1f %+8.1f %.3f\n", i, g.beats[(size_t) i], bar, beat,
+                     g.bpmOfInterval (i), nearest (res->forwardBeats, g.beats[(size_t) i]),
+                     nearest (res->backwardBeats, g.beats[(size_t) i]), res->peakOdfNear (g.beats[(size_t) i], 0.03));
+    }
+    return 0;
+}
+
 int main (int argc, char** argv)
 {
+    if (argc == 3 && juce::String (argv[1]) == "--dump")
+        return dumpFile (juce::File (argv[2]));
+
     if (argc == 4 && juce::String (argv[1]) == "--compare")
         return compareFiles (juce::File::getCurrentWorkingDirectory().getChildFile (argv[2]),
                              juce::File::getCurrentWorkingDirectory().getChildFile (argv[3]));
@@ -492,6 +623,8 @@ int main (int argc, char** argv)
 
     testLayoutEdgeCases();
     testMetronome();
+    testMergeOffbeatPasses();
+    testMergeDoubleTempoIntro();
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
