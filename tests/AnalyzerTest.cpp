@@ -427,6 +427,64 @@ void testMergeDoubleTempoIntro()
                                + juce::String ((int) truth.size()) + "), F=" + juce::String (sc.fMeasure, 3));
 }
 
+/** Regression: the song opens with loud pickup notes before the first beat. The
+    forward pass, still settling from its cold start, puts beats on them at a faster,
+    slowing-down tempo; the backward pass (fully locked by then) has the real grid. */
+void testMergeColdStart()
+{
+    std::printf ("\n=== merge: forward pass still settling at the song start ===\n");
+
+    // Onset strengths relative to a typical beat, as measured on the real song that
+    // showed the problem: quiet first beat, then loud pickup notes off the grid.
+    // `harsh` also makes the second true beat quiet: that case is genuinely
+    // ambiguous from the audio alone, so it is reported but not required to pass.
+    for (bool harsh : { false, true })
+    {
+        AnalysisResult a;
+        a.durationSeconds = 60.0;
+        a.odfHop = 128.0 / 44100.0;
+        a.odf.assign ((size_t) (60.0 / a.odfHop), 0.05f);
+
+        const double period = 60.0 / 98.0;
+        std::vector<double> truth, fwd, bwd;
+        for (double t = 1.32; t < 59.0; t += period)
+        {
+            truth.push_back (t);
+            float strength = 1.0f;
+            if (truth.size() == 1) strength = 0.13f;
+            if (truth.size() == 2) strength = harsh ? 0.13f : 1.4f;
+            a.odf[(size_t) std::lround (t / a.odfHop)] = strength;
+        }
+
+        const std::pair<double, float> pickups[] = { { 1.00, 1.7f }, { 1.52, 1.15f }, { 2.03, 0.45f } };
+        for (auto [t, v] : pickups)
+            a.odf[(size_t) std::lround (t / a.odfHop)] = v;
+
+        fwd = { 0.46, 1.00, 1.52, 2.03, 2.59 };   // 115 BPM slowing down towards 98
+        for (double t : truth) if (t > 3.0) fwd.push_back (t);
+        bwd = { 0.10, 0.71 };                     // backward pass extrapolates the grid into the silence
+        for (double t : truth) bwd.push_back (t);
+
+        auto merged = BeatAnalyzer::mergePasses (fwd, bwd, a);
+        std::vector<double> firstBeats;
+        for (double t : merged) if (t < 3.5) firstBeats.push_back (t);
+
+        bool onGrid = true;
+        for (double t : firstBeats)
+            if (t > 0.9 && std::abs (std::remainder (t - truth[0], period)) > 0.03)
+                onGrid = false;
+
+        juce::String list;
+        for (double t : firstBeats) list << juce::String (t, 2) << " ";
+
+        if (harsh)
+            std::printf ("  [INFO] ambiguous variant (two quiet true beats): first beats %s -> %s\n",
+                         list.trim().toRawUTF8(), onGrid ? "on grid" : "follows the pickup notes");
+        else
+            check (onGrid, "first beats follow the steady grid: " + list.trim());
+    }
+}
+
 /** Renders the playback engine offline and checks the metronome clicks land on the beats. */
 void testMetronome()
 {
@@ -575,6 +633,20 @@ int dumpFile (const juce::File& file)
                          localBpm (res->rawBeats, t, t + 5), localBpm (g.beats, t, t + 5), res->rmsAt (t + 2.5));
         return 0;
     }
+    if (juce::SystemStats::getEnvironmentVariable ("BEATIT_START", "").isNotEmpty())
+    {
+        auto show = [&] (const char* label, const std::vector<double>& v)
+        {
+            std::printf ("  %-6s", label);
+            for (double x : v) if (x < 4.5) std::printf (" %.3f(%.0f)", x, res->peakOdfNear (x, 0.03));
+            std::printf ("\n");
+        };
+        show ("fwd", res->forwardBeats); show ("bwd", res->backwardBeats); show ("merged", res->rawBeats);
+        std::printf ("  rms per 0.25 s:");
+        for (double t = 0; t < 4.5; t += 0.25) std::printf (" %.3f", res->rmsAt (t));
+        std::printf ("\n");
+        return 0;
+    }
     std::printf ("  idx  time      bar.beat  bpm      dFwd(ms) dBwd(ms) odf\n");
     for (int i = 0; i < (int) g.beats.size(); ++i)
     {
@@ -625,6 +697,7 @@ int main (int argc, char** argv)
     testMetronome();
     testMergeOffbeatPasses();
     testMergeDoubleTempoIntro();
+    testMergeColdStart();
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;

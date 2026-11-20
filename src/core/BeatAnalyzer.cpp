@@ -198,8 +198,24 @@ std::vector<double> BeatAnalyzer::mergePasses (const std::vector<double>& fwd, c
     std::nth_element (peaks.begin(), peaks.begin() + (long) peaks.size() / 2, peaks.end());
     const double median = std::max (1.0e-9, peaks[peaks.size() / 2]);
 
+    // BTrack needs several seconds to lock on from a cold start: the forward
+    // pass is unreliable at the start of the song, the backward pass at the
+    // end. Confidence ramps from 0 to 1 over the first warmUp seconds of each
+    // pass's run.
+    constexpr double warmUp = 8.0;
+    const double songEnd = std::max (fwd.back(), bwd.back());
+    auto confFwd = [&] (double t) { return juce::jlimit (0.0, 1.0, t / warmUp); };
+    auto confBwd = [&] (double t) { return juce::jlimit (0.0, 1.0, (songEnd - t) / warmUp); };
+
+    constexpr double warmUpPenalty = 1.5;
     for (auto& c : cands)
+    {
         c.s = std::min (3.0, c.s / median) + (c.mask == 3 ? 0.5 : 0.0); // bonus when both passes agree
+
+        // a beat that only a still-settling pass reports is suspect
+        if (c.mask == 1) c.s -= warmUpPenalty * (1.0 - confFwd (c.t));
+        if (c.mask == 2) c.s -= warmUpPenalty * (1.0 - confBwd (c.t));
+    }
 
     // DP over pairs (previous beat, current beat) so that the transition
     // cost can compare consecutive intervals (second-order smoothness).
@@ -246,18 +262,22 @@ std::vector<double> BeatAnalyzer::mergePasses (const std::vector<double>& fwd, c
     }
 
     // cost of an interval ending at candidate j: distance (in log tempo)
-    // to the closer of the two passes' local periods, plus to the global period
+    // to the closer of the two passes' local periods (a pass that is still
+    // warming up is a worse reference), plus to the global period
     auto tempoCost = [&] (int j, double interval)
     {
+        const double t = cands[(size_t) j].t;
         const double g = std::log (interval / globalPeriod);
         const double globalCost = lambdaGlobal * g * g;
 
         double best = 1.0e9;
-        for (double ref : { refFwd[(size_t) j], refBwd[(size_t) j] })
+        const std::pair<double, double> refs[] = { { refFwd[(size_t) j], confFwd (t) },
+                                                   { refBwd[(size_t) j], confBwd (t) } };
+        for (auto [ref, conf] : refs)
             if (ref > 0.0)
             {
                 const double r = std::log (interval / ref);
-                best = std::min (best, r * r);
+                best = std::min (best, r * r + 0.15 * (1.0 - conf));
             }
         return (best < 1.0e8 ? lambdaTempo * best : 0.0) + globalCost;
     };
