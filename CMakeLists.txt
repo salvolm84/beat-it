@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Target architecture")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
-project(BeatIt VERSION 1.0.0 LANGUAGES C CXX)
+project(BeatIt VERSION 1.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -80,6 +80,8 @@ juce_add_gui_app(BeatIt
     BUNDLE_ID "com.beatit.tempomapper"
     COMPANY_NAME "Beat It"
     VERSION ${PROJECT_VERSION}
+    ICON_BIG ${CMAKE_CURRENT_SOURCE_DIR}/resources/icon_1024.png
+    ICON_SMALL ${CMAKE_CURRENT_SOURCE_DIR}/resources/icon_1024.png
     DOCUMENT_EXTENSIONS wav mp3 aif aiff flac m4a
     NEEDS_CURL FALSE
     NEEDS_WEB_BROWSER FALSE)
@@ -91,6 +93,14 @@ target_sources(BeatIt PRIVATE
     src/app/AudioEngine.cpp
     src/app/WaveformView.cpp
     src/app/TempoCurveView.cpp)
+
+# JUCE's generated .icns only contains the large sizes; replace it with the
+# complete set (16..1024 px) made by tools/make_icon.py
+add_custom_command(TARGET BeatIt POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_SOURCE_DIR}/resources/AppIcon.icns
+            "$<TARGET_BUNDLE_CONTENT_DIR:BeatIt>/Resources/AppIcon.icns"
+    COMMENT "Installing full-size app icon")
 
 target_include_directories(BeatIt PRIVATE src/app src/core)
 target_compile_definitions(BeatIt PRIVATE ${BEATIT_COMMON_DEFS}
