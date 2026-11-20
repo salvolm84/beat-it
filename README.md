@@ -1,0 +1,88 @@
+# Beat It — variable-tempo mapper → MIDI tempo map
+
+A native macOS (Apple Silicon) JUCE app. It loads a song, tracks every beat (including tempo drift,
+ramps and sudden changes), lets you check and fix the grid by ear with a metronome, and exports a
+MIDI file whose tempo map lines up the DAW grid with the recording. It is built for Reaper.
+
+## Build
+
+Requirements: Xcode command line tools, CMake ≥ 3.22. Everything else (JUCE 8.0.15, BTrack,
+libsamplerate) is downloaded by CMake on the first configure and linked statically.
+
+```sh
+./build.sh            # configure, build, run the self-test
+./build.sh install    # ...and copy "Beat It.app" to /Applications
+```
+
+The app is at `build/BeatIt_artefacts/Release/Beat It.app`.
+
+## Workflow
+
+1. **Open** a WAV / MP3 / AIFF / FLAC / M4A file (or drop it on the window). Analysis runs
+   automatically and takes about 1 s per 2 minutes of audio.
+2. **Check**: play with the metronome on. Orange lines are bar starts and the curve below is
+   BPM per beat.
+3. **Fix** anything that's off:
+   * Wrong tempo octave (twice or half the real tempo): use **/2** / **x2**, or narrow the BPM range.
+   * Bars start on the wrong beat: use **Bar start < >** or **Auto**, or right-click a beat → *Set as bar start*.
+   * Individual beats: drag them (hold Cmd for fine moves), double-click to add, Option-click to delete.
+     During playback, press **B** to add a beat at the playhead. Undo/redo with Cmd+Z / Cmd+Shift+Z.
+   * Song played to a click? Tick **Constant tempo**.
+4. **Export MIDI tempo map…**
+
+### Importing into Reaper
+
+1. New project, then put the audio item at **0:00**. Set the audio track's timebase to *Time*
+   (Track ▸ right-click ▸ Track timebase) so the new tempo map doesn't stretch it.
+2. *Insert ▸ Media file…* ▸ choose the exported `.mid` ▸ answer **Yes** to *"Import tempo map
+   from MIDI file?"*.
+3. Every beat of the grid now sits on a beat of the recording. The optional "Click" track has a
+   wood-block note on every beat, so you can check alignment directly in Reaper.
+
+### How the MIDI file is laid out
+
+* Format 1, 960 PPQ by default, with **one tempo event per beat**. Tick 0 = the very start of the audio file.
+* Tempo values are rounded with error feedback, so no drift builds up; every beat lands within
+  about 0.0005 ms of the detected audio beat.
+* If the music doesn't start right away, evenly spaced *lead-in beats* fill the gap before the
+  first detected beat.
+* If the first downbeat isn't at the start of a bar, bar 1 becomes a short *pickup bar* (e.g. 2/4),
+  so bar 2 starts exactly on the downbeat.
+* Time signatures 1–16 over 2/4/8/16 are supported (e.g. 6/8: tempo stays in quarter notes, as the MIDI spec requires).
+
+## How the detection works
+
+* **[BTrack](https://github.com/adamstark/BTrack)** (Adam Stark, Queen Mary University of
+  London, GPL-3) is the beat tracker. Audio is mixed to mono and resampled to 44.1 kHz with
+  **[libsamplerate](https://github.com/libsndfile/libsamplerate)**, because BTrack's constants assume
+  that rate.
+* BTrack is a real-time (causal) tracker, so it lags behind tempo ramps and needs a few seconds to
+  re-lock after a sudden change. Because the whole file is available, Beat It runs BTrack
+  **forwards and backwards**. It then uses dynamic programming to choose, section by section, the beats
+  that best fit the onsets with smooth tempo. On test songs with sudden tempo changes this raised
+  accuracy (F-measure) from 0.92 to 0.99.
+* BTrack only reports tempos between 80 and 160 BPM. Slow songs are detected automatically when
+  every other beat is much weaker, and then halved.
+* Beats are then **snapped to transients** (high-resolution spectral flux with sub-sample
+  interpolation) and smoothed with a local linear fit. Optional cleanups fill in missed beats and
+  remove doubled ones.
+* **Bar starts** are guessed from chord changes (a chromagram) and low-frequency (kick) energy.
+
+## Tests
+
+`BeatItTest` builds synthetic songs with a known variable tempo: steady → ramp → sudden drop → ramp,
+a drifting syncopated groove, and a 72 BPM ballad. It scores the detected beats against the ground
+truth, then reads the exported MIDI back through JUCE's MIDI timing code to check that every MIDI
+beat lands on its audio beat. It also covers pickup and time-signature edge cases and checks that
+metronome clicks are sample-accurate when rendered offline.
+
+```sh
+./build/BeatItTest_artefacts/Release/BeatItTest [out-dir]         # out-dir: also writes the test WAVs + MIDI
+./build/BeatItTest_artefacts/Release/BeatItTest --compare a.wav a.mp3   # decoder alignment + beat comparison
+```
+
+Current results: F-measure 0.99–1.0, mean timing error 2–3 ms. WAV and MP3 decode with 0 samples of offset.
+
+## Licence
+
+Beat It links JUCE (GPL-3 / commercial) and BTrack (GPL-3), so the app as built is GPL-3.
