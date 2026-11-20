@@ -11,6 +11,8 @@ cmake --build build -j"$(sysctl -n hw.ncpu)"
 ./build/BeatItTest_artefacts/Release/BeatItTest
 
 APP="build/BeatIt_artefacts/Release/Beat It.app"
+# ad-hoc sign the whole bundle (the linker only signs the executable)
+codesign --force --deep --sign - "$APP"
 echo "\nBuilt: $APP"
 
 if [[ "${1:-}" == "install" ]]; then
