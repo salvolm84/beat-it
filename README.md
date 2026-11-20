@@ -4,6 +4,17 @@ A native macOS (Apple Silicon) JUCE app. It loads a song, tracks every beat (inc
 ramps and sudden changes), lets you check and fix the grid by ear with a metronome, and exports a
 MIDI file whose tempo map lines up the DAW grid with the recording. It is built for Reaper.
 
+## Download
+
+Get `BeatIt-<version>-macOS-arm64.zip` from the
+[Releases page](https://github.com/salvolm84/beat-it/releases). It needs an Apple Silicon Mac with macOS 11 or later.
+
+The app is signed ad hoc, not notarized by Apple, so macOS blocks it the first time you open it.
+After unzipping and moving it to /Applications, either:
+
+* right-click **Beat It** ▸ **Open** ▸ **Open**, or
+* if macOS says the app "is damaged", run `xattr -dr com.apple.quarantine "/Applications/Beat It.app"` in Terminal.
+
 ## Build
 
 Requirements: Xcode command line tools, CMake ≥ 3.22. Everything else (JUCE 8.0.15, BTrack,
