@@ -31,10 +31,22 @@ void WaveformView::setAudio (const juce::AudioBuffer<float>* buffer, double rate
     repaint();
 }
 
-void WaveformView::setGrid (const beatit::BeatGrid* g, const beatit::GridLayout* l)
+void WaveformView::setAudioOffset (double seconds)
+{
+    if (! juce::exactlyEqual (seconds, audioOffset))
+    {
+        audioOffset = std::max (0.0, seconds);
+        repaint();
+    }
+}
+
+void WaveformView::setGrid (const beatit::BeatGrid* g, const beatit::GridLayout* l, int locked)
 {
     grid = g;
     layout = l;
+    lockedBeats = std::max (0, locked);
+    if (selectedBeat < lockedBeats) selectedBeat = -1;
+    if (hoveredBeat < lockedBeats)  hoveredBeat = -1;
     if (grid == nullptr || selectedBeat >= (int) grid->beats.size()) selectedBeat = -1;
     if (grid == nullptr || hoveredBeat >= (int) grid->beats.size())  hoveredBeat = -1;
     repaint();
@@ -88,7 +100,8 @@ int WaveformView::beatUnder (float x) const
         return -1;
 
     const double tolerance = (viewEnd - viewStart) * 6.0 / std::max (1, getWidth());
-    return grid->nearestBeat (xToTime (x), tolerance);
+    const int b = grid->nearestBeat (xToTime (x), tolerance);
+    return b >= lockedBeats ? b : -1;   // pre-count beats are not editable
 }
 
 //==============================================================================
@@ -112,8 +125,12 @@ void WaveformView::drawWaveformDirect (juce::Graphics& g, juce::Rectangle<int> a
 
         for (int x = 0; x < area.getWidth(); ++x)
         {
-            const int s0 = juce::jlimit (0, total - 1, (int) (xToTime ((float) x) * sampleRate));
-            const int s1 = juce::jlimit (0, total - 1, (int) (xToTime ((float) x + 1.0f) * sampleRate));
+            const double a = (xToTime ((float) x) - audioOffset) * sampleRate;
+            const double b = (xToTime ((float) x + 1.0f) - audioOffset) * sampleRate;
+            if (b < 0.0 || a >= (double) total) { cols[(size_t) x] = { 0.0f, 0.0f }; continue; }
+
+            const int s0 = juce::jlimit (0, total - 1, (int) a);
+            const int s1 = juce::jlimit (0, total - 1, (int) b);
 
             float lo = d[s0], hi = d[s0];
             for (int s = s0 + 1; s <= s1; ++s) { lo = std::min (lo, d[s]); hi = std::max (hi, d[s]); }
@@ -176,8 +193,32 @@ void WaveformView::paint (juce::Graphics& g)
         }
         else
         {
-            g.setColour (theme::waveform);
-            thumbnail.drawChannels (g, area, viewStart, viewEnd, 1.0f);
+            // thumbnail times are file times; only draw where the audio exists on the timeline
+            const int xStart = juce::jlimit (area.getX(), area.getRight(), (int) std::ceil (timeToX (audioOffset)));
+            const auto sub = area.withLeft (xStart);
+            if (sub.getWidth() > 0)
+            {
+                g.setColour (theme::waveform);
+                thumbnail.drawChannels (g, sub, xToTime ((float) xStart) - audioOffset, viewEnd - audioOffset, 1.0f);
+            }
+        }
+
+        // pre-count region (silence added before the audio)
+        if (audioOffset > 0.0)
+        {
+            const float x0 = timeToX (0.0), x1 = timeToX (audioOffset);
+            if (x1 > 0.0f && x0 < (float) getWidth())
+            {
+                const auto r = juce::Rectangle<float> (x0, (float) wave.getY(), x1 - x0, (float) wave.getHeight());
+                g.setColour (theme::accent.withAlpha (0.06f));
+                g.fillRect (r);
+                g.setColour (theme::accent.withAlpha (0.5f));
+                g.fillRect (r.withX (x1 - 1.0f).withWidth (2.0f));
+                g.setColour (theme::textDim);
+                g.setFont (juce::FontOptions (12.0f));
+                if (r.getWidth() > 70.0f)
+                    g.drawText ("Pre-count", r.reduced (8.0f, 6.0f).withHeight (16.0f), juce::Justification::centredLeft, true);
+            }
         }
 
         // channel centre lines
@@ -215,6 +256,7 @@ void WaveformView::paint (juce::Graphics& g)
 
             juce::Colour c = down ? theme::accent.withAlpha (0.85f) : theme::beatLine;
             float w = down ? 1.6f : 1.0f;
+            if (i < lockedBeats)   c = c.withMultipliedAlpha (0.45f);
             if (i == hoveredBeat)  { c = c.brighter (0.6f).withAlpha (1.0f); w += 1.0f; }
             if (i == selectedBeat) { c = theme::accentAlt; w = 2.4f; }
 

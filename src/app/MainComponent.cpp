@@ -8,12 +8,14 @@ namespace
 {
     enum MenuIds
     {
-        menuOpen = 1, menuAnalyze, menuExportMidi, menuExportCsv, menuAudioSettings,
+        menuOpen = 1, menuAnalyze, menuExportMidi, menuExportCsv, menuExportClick, menuPadFolder, menuAudioSettings,
         menuUndo = 100, menuRedo, menuDeleteBeat, menuAddBeatAtPlayhead, menuDoubleTempo, menuHalveTempo, menuAutoDownbeat,
         menuPlay = 200, menuToStart, menuMetronome, menuLoop, menuFollow,
         menuZoomIn = 300, menuZoomOut, menuZoomFit,
-        menuShortcuts = 400
+        menuShortcuts = 400, menuAbout
     };
+
+    const juce::String appVersion { JUCE_APPLICATION_VERSION_STRING };
 
     juce::String formatTime (double t)
     {
@@ -274,6 +276,12 @@ MainComponent::MainComponent()
     downbeatPrevButton.onClick = [this] { shiftDownbeat (-1); };
     downbeatNextButton.onClick = [this] { shiftDownbeat (1); };
     downbeatAutoButton.onClick = [this] { autoDownbeat(); };
+    halfBeatButton.setClickingTogglesState (true);
+    halfBeatButton.setColour (juce::TextButton::buttonOnColourId, theme::accent);
+    halfBeatButton.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
+    halfBeatButton.setTooltip ("Move every beat by half a beat. Use it when the grid sits on the off-beats "
+                               "(hi-hat / guitar skank) instead of the kick and bass, common in reggae, ska and swing.");
+    halfBeatButton.onClick = [this] { reprocess (true, true); };
     doubleButton.onClick = [this] { changeTempoOctave (true); };
     halveButton.onClick = [this] { changeTempoOctave (false); };
     undoButton.onClick = [this] { undo(); };
@@ -281,7 +289,7 @@ MainComponent::MainComponent()
 
     for (auto* c : std::initializer_list<juce::Component*> { &timeSigLabel, &numeratorBox, &denominatorBox, &downbeatLabel,
                                                               &downbeatPrevButton, &downbeatNextButton, &downbeatAutoButton,
-                                                              &tempoOctaveLabel, &doubleButton, &halveButton, &undoButton,
+                                                              &halfBeatButton, &tempoOctaveLabel, &doubleButton, &halveButton, &undoButton,
                                                               &redoButton, &gridInfoLabel, &editHintLabel })
         addSide (*c);
 
@@ -319,9 +327,25 @@ MainComponent::MainComponent()
     exportMidiButton.onClick = [this] { exportMidi(); };
     exportCsvButton.onClick = [this] { exportCsv(); };
     exportCsvButton.setTooltip ("Export beats as CSV: time, bar, beat, BPM (Cmd+Shift+E)");
+    styleLabel (preCountLabel, "Pre-count");
+    preCountBox.addItem ("Off", 1);
+    for (int b = 1; b <= 16; ++b) preCountBox.addItem (juce::String (b) + (b == 1 ? " beat" : " beats"), b + 1);
+    preCountBox.setSelectedId (1, juce::dontSendNotification);
+    preCountBox.setTooltip ("Count-in beats added before the song in all exports. The audio has to be delayed by the "
+                            "same amount: use \"Pad audio folder\" for the song and its stems.");
+    preCountBox.onChange = [this] { refreshPreCount(); gridChanged(); saveSettings(); };
+    styleLabel (preCountInfoLabel, {});
+    preCountInfoLabel.setFont (juce::Font (juce::FontOptions (12.0f)));
+    padFolderButton.onClick = [this] { padAudioFolder(); };
+    padFolderButton.setTooltip ("Prepend the pre-count silence to every audio file in a folder (not sub-folders). "
+                                "Padded WAV copies go in a new sub-folder; the originals are not changed.");
+    exportClickButton.onClick = [this] { exportMetronomeAudio(); };
+    exportClickButton.setTooltip ("Export the metronome alone as a WAV file, same length and sample rate as the song, "
+                                  "to place at 0:00 in the DAW (Cmd+Option+E)");
 
     for (auto* c : std::initializer_list<juce::Component*> { &ppqLabel, &ppqBox, &clickTrackToggle, &markersToggle,
-                                                              &exportMidiButton, &exportCsvButton })
+                                                              &exportMidiButton, &exportCsvButton, &exportClickButton,
+                                                              &preCountLabel, &preCountBox, &preCountInfoLabel, &padFolderButton })
         addSide (*c);
 
     // ---- status bar
@@ -385,6 +409,7 @@ void MainComponent::loadSettings()
     constantToggle.setToggleState (false, juce::dontSendNotification);
 
     ppqBox.setSelectedId (s.getIntValue ("ppq", 960), juce::dontSendNotification);
+    preCountBox.setSelectedId (juce::jlimit (0, 16, s.getIntValue ("preCount", 0)) + 1, juce::dontSendNotification);
     clickTrackToggle.setToggleState (s.getBoolValue ("clickTrack", true), juce::dontSendNotification);
     markersToggle.setToggleState (s.getBoolValue ("markers", false), juce::dontSendNotification);
 
@@ -414,6 +439,7 @@ void MainComponent::saveSettings()
     s.setValue ("fixOutliers", fixToggle.getToggleState());
     s.setValue ("trimSilence", silenceToggle.getToggleState());
     s.setValue ("ppq", ppqBox.getSelectedId());
+    s.setValue ("preCount", std::max (0, preCountBox.getSelectedId() - 1));
     s.setValue ("clickTrack", clickTrackToggle.getToggleState());
     s.setValue ("markers", markersToggle.getToggleState());
 
@@ -437,7 +463,10 @@ void MainComponent::paint (juce::Graphics& g)
     // app title
     g.setColour (theme::accent);
     g.setFont (juce::Font (juce::FontOptions (19.0f, juce::Font::bold)));
-    g.drawText ("Beat It", 16, 0, 80, 52, juce::Justification::centredLeft);
+    g.drawText ("Beat It", 16, 6, 80, 28, juce::Justification::centredLeft);
+    g.setColour (theme::textDim);
+    g.setFont (juce::Font (juce::FontOptions (11.0f)));
+    g.drawText ("v" + appVersion, 16, 31, 80, 14, juce::Justification::centredLeft);
 
     // status bar
     g.setColour (theme::panel);
@@ -566,7 +595,8 @@ void MainComponent::layoutSidePanel()
         auto r = labelled (downbeatLabel);
         downbeatPrevButton.setBounds (r.removeFromLeft (36)); r.removeFromLeft (4);
         downbeatNextButton.setBounds (r.removeFromLeft (36)); r.removeFromLeft (8);
-        downbeatAutoButton.setBounds (r.removeFromLeft (64));
+        downbeatAutoButton.setBounds (r.removeFromLeft (64)); r.removeFromLeft (8);
+        halfBeatButton.setBounds (r);
     }
     {
         auto r = labelled (tempoOctaveLabel);
@@ -599,6 +629,11 @@ void MainComponent::layoutSidePanel()
     // EXPORT
     beginSection ("EXPORT");
     {
+        auto r = labelled (preCountLabel);
+        preCountBox.setBounds (r.removeFromLeft (120));
+    }
+    preCountInfoLabel.setBounds (row (18));
+    {
         auto r = labelled (ppqLabel);
         ppqBox.setBounds (r.removeFromLeft (120));
     }
@@ -610,6 +645,8 @@ void MainComponent::layoutSidePanel()
         r.removeFromRight (6);
         exportMidiButton.setBounds (r);
     }
+    exportClickButton.setBounds (row (28));
+    padFolderButton.setBounds (row (28));
     endSection();
 
     const int needed = area.getY() + 10;
@@ -651,12 +688,13 @@ void MainComponent::timerCallback()
     playButton.setIcon (engine.isPlaying() ? IconButton::Icon::pause : IconButton::Icon::play);
     timeLabel.setText (formatTime (pos), juce::dontSendNotification);
 
-    if (! grid.isEmpty())
+    if (! shownGrid.isEmpty())
     {
-        const auto p = grid.positionAt (pos, layout);
-        barBeatLabel.setText (p.valid ? "Bar " + juce::String (p.bar) + "  Beat " + juce::String (p.beat) : juce::String ("-"),
+        const auto p = shownGrid.positionAt (pos, shownLayout);
+        const juce::String prefix (pos < timelineOffset() ? "Count-in  " : "");
+        barBeatLabel.setText (p.valid ? prefix + "Bar " + juce::String (p.bar) + "  Beat " + juce::String (p.beat) : juce::String ("-"),
                               juce::dontSendNotification);
-        bpmLabel.setText (juce::String (grid.bpmAtTime (pos), 2) + " BPM", juce::dontSendNotification);
+        bpmLabel.setText (juce::String (shownGrid.bpmAtTime (pos), 2) + " BPM", juce::dontSendNotification);
     }
     else
     {
@@ -775,8 +813,11 @@ void MainComponent::onAudioLoaded (std::shared_ptr<juce::AudioBuffer<float>> buf
     hasManualEdits = false;
     setLoop (0, 0, false);
 
-    engine.setAudio (audioBuffer, rate);
+    halfBeatButton.setToggleState (false, juce::dontSendNotification);   // a per-song fix
+    preCount = {};
+    engine.setAudio (audioBuffer, rate);   // also resets the lead-in
     waveform.setAudio (audioBuffer.get(), rate);
+    waveform.setAudioOffset (0.0);
     gridChanged();
     zoomToFit();
 
@@ -846,6 +887,7 @@ void MainComponent::onAnalysisFinished (std::optional<AnalysisResult> result, in
     grid.beats = ops::process (*analysis, procOptions);
     grid.downbeatOffset = ops::guessDownbeatOffset (grid.beats, grid.beatsPerBar, *analysis);
     hasManualEdits = false;
+    refreshPreCount();
     gridChanged();
 
     // Developer hook: BEATIT_SNAPSHOT=/path/prefix renders the UI to PNGs after
@@ -894,9 +936,10 @@ void MainComponent::readProcessingOptionsFromUI()
     procOptions.fixOutliers = fixToggle.getToggleState();
     procOptions.trimSilence = silenceToggle.getToggleState();
     procOptions.constantTempo = constantToggle.getToggleState();
+    procOptions.halfBeatShift = halfBeatButton.getToggleState();
 }
 
-void MainComponent::reprocess (bool pushUndoFirst)
+void MainComponent::reprocess (bool pushUndoFirst, bool reguessBarStarts)
 {
     readProcessingOptionsFromUI();
     smoothingSlider.setEnabled (! procOptions.constantTempo);
@@ -910,19 +953,20 @@ void MainComponent::reprocess (bool pushUndoFirst)
     const size_t oldCount = grid.beats.size();
     grid.beats = ops::process (*analysis, procOptions);
 
-    if (grid.beats.size() != oldCount)
+    if (reguessBarStarts || grid.beats.size() != oldCount)
         grid.downbeatOffset = ops::guessDownbeatOffset (grid.beats, grid.beatsPerBar, *analysis);
 
     if (hasManualEdits)
         setStatus ("Processing re-applied: manual beat edits were replaced (Cmd+Z to undo).");
     hasManualEdits = false;
+    refreshPreCount();
     gridChanged();
 }
 
 //==============================================================================
 void MainComponent::pushUndo()
 {
-    undoStack.push_back (grid);
+    undoStack.push_back ({ grid, preCount });
     if (undoStack.size() > 300)
         undoStack.erase (undoStack.begin());
     redoStack.clear();
@@ -932,64 +976,128 @@ void MainComponent::pushUndo()
 void MainComponent::undo()
 {
     if (undoStack.empty()) return;
-    redoStack.push_back (grid);
-    grid = undoStack.back();
+    redoStack.push_back ({ grid, preCount });
+    const auto state = undoStack.back();
     undoStack.pop_back();
-    gridChanged();
+    restoreState (state);
     setStatus ("Undo");
 }
 
 void MainComponent::redo()
 {
     if (redoStack.empty()) return;
-    undoStack.push_back (grid);
-    grid = redoStack.back();
+    undoStack.push_back ({ grid, preCount });
+    const auto state = redoStack.back();
     redoStack.pop_back();
-    gridChanged();
+    restoreState (state);
     setStatus ("Redo");
+}
+
+void MainComponent::restoreState (const DocState& state)
+{
+    grid = state.grid;
+    // the silence travels with the undo step, unless the pre-count setting changed since
+    if (state.preCount.beats == selectedPreCountBeats() && state.preCount.isActive())
+        setPreCount (state.preCount);
+    else
+        refreshPreCount();
+    gridChanged();
+}
+
+void MainComponent::updateShownGrid()
+{
+    shownGrid = ops::applyPreCount (grid, preCount);
+    shownLayout = shownGrid.computeLayout();
+    engine.setBeats (shownGrid.beats, downbeatFlags (shownGrid));
 }
 
 void MainComponent::gridChanged()
 {
     layout = grid.computeLayout();
-
-    std::vector<bool> downbeats (grid.beats.size());
-    for (size_t i = 0; i < grid.beats.size(); ++i)
-        downbeats[i] = grid.isDownbeat ((int) i);
-    engine.setBeats (grid.beats, std::move (downbeats));
+    updateShownGrid();
 
     if (numeratorBox.getSelectedId() != grid.beatsPerBar)
         numeratorBox.setSelectedId (grid.beatsPerBar, juce::dontSendNotification);
     if (denominatorBox.getSelectedId() != grid.denominator)
         denominatorBox.setSelectedId (grid.denominator, juce::dontSendNotification);
 
-    waveform.setGrid (&grid, &layout);
-    tempoView.setGrid (&grid);
+    waveform.setGrid (&shownGrid, &shownLayout, countInBeats());
+    tempoView.setGrid (&shownGrid);
     updateInfoLabels();
     updateControlStates();
 }
 
-void MainComponent::moveBeat (int i, double t)
+void MainComponent::moveBeat (int shownIndex, double timelineTime)
 {
+    // UI coordinates (pre-count included) -> song coordinates
+    const int i = shownIndex - countInBeats();
+    const double t = timelineTime - timelineOffset();
     if (i < 0 || i >= (int) grid.beats.size())
         return;
 
     const double lo = i > 0 ? grid.beats[(size_t) i - 1] + 0.03 : 0.0;
-    const double hi = i + 1 < (int) grid.beats.size() ? grid.beats[(size_t) i + 1] - 0.03 : engine.getDuration();
+    const double hi = i + 1 < (int) grid.beats.size() ? grid.beats[(size_t) i + 1] - 0.03 : songDuration();
     grid.beats[(size_t) i] = juce::jlimit (lo, std::max (lo, hi), t);
     layout = grid.computeLayout();
-    waveform.setGrid (&grid, &layout);
-    tempoView.setGrid (&grid);
-
-    std::vector<bool> downbeats (grid.beats.size());
-    for (size_t k = 0; k < grid.beats.size(); ++k)
-        downbeats[k] = grid.isDownbeat ((int) k);
-    engine.setBeats (grid.beats, std::move (downbeats));
+    updateShownGrid();
+    waveform.setGrid (&shownGrid, &shownLayout, countInBeats());
+    tempoView.setGrid (&shownGrid);
 }
 
-void MainComponent::addBeat (double t)
+std::vector<bool> MainComponent::downbeatFlags (const BeatGrid& g)
 {
-    if (audioBuffer == nullptr || t < 0.0 || t > engine.getDuration())
+    std::vector<bool> downbeats (g.beats.size());
+    for (size_t i = 0; i < g.beats.size(); ++i)
+        downbeats[i] = g.isDownbeat ((int) i);
+    return downbeats;
+}
+
+int MainComponent::selectedPreCountBeats() const
+{
+    return std::max (0, preCountBox.getSelectedId() - 1);
+}
+
+double MainComponent::songDuration() const
+{
+    return audioBuffer != nullptr && fileSampleRate > 0.0 ? audioBuffer->getNumSamples() / fileSampleRate : 0.0;
+}
+
+void MainComponent::refreshPreCount()
+{
+    setPreCount (ops::computePreCount (grid, selectedPreCountBeats(), fileSampleRate));
+}
+
+void MainComponent::setPreCount (PreCount pc)
+{
+    const double oldOffset = timelineOffset();
+    const double oldDuration = engine.getDuration();
+    const bool wasShowingAll = viewStart <= 1.0e-6 && viewEnd >= oldDuration - 1.0e-6;
+
+    preCount = pc;
+    const double delta = timelineOffset() - oldOffset;
+
+    engine.setLeadIn (pc.isActive() ? pc.silenceSamples : 0);   // the playhead keeps its place in the music
+    waveform.setAudioOffset (timelineOffset());
+
+    if (std::abs (delta) > 1.0e-12)
+    {
+        if (loopEnd > loopStart)
+            setLoop (std::max (0.0, loopStart + delta), loopEnd + delta, loopButton.getToggleState());
+
+        if (wasShowingAll) zoomToFit();
+        else               setViewRange (viewStart + delta, viewEnd + delta);
+    }
+}
+
+void MainComponent::addBeat (double timelineTime)
+{
+    const double t = timelineTime - timelineOffset();
+    if (audioBuffer != nullptr && t < 0.0 && timelineTime >= 0.0)
+    {
+        setStatus ("That's inside the pre-count - its beats follow the song's first beats automatically.");
+        return;
+    }
+    if (audioBuffer == nullptr || t < 0.0 || t > songDuration())
         return;
 
     if (grid.nearestBeat (t, 0.03) >= 0)
@@ -1009,12 +1117,13 @@ void MainComponent::addBeat (double t)
 
     hasManualEdits = true;
     gridChanged();
-    waveform.setSelectedBeat (index);
-    setStatus ("Beat added at " + formatTime (t));
+    waveform.setSelectedBeat (index + countInBeats());
+    setStatus ("Beat added at " + formatTime (timelineTime));
 }
 
-void MainComponent::deleteBeat (int i)
+void MainComponent::deleteBeat (int shownIndex)
 {
+    const int i = shownIndex - countInBeats();
     if (i < 0 || i >= (int) grid.beats.size())
         return;
 
@@ -1029,13 +1138,14 @@ void MainComponent::deleteBeat (int i)
     setStatus ("Beat deleted");
 }
 
-void MainComponent::setDownbeat (int i)
+void MainComponent::setDownbeat (int shownIndex)
 {
-    if (i < 0 || i >= (int) grid.beats.size())
+    if (shownIndex < 0 || shownIndex >= (int) shownGrid.beats.size())
         return;
 
     pushUndo();
-    grid.downbeatOffset = i % std::max (1, grid.beatsPerBar);
+    const int bpb = std::max (1, grid.beatsPerBar);
+    grid.downbeatOffset = ((shownIndex - countInBeats()) % bpb + bpb) % bpb;
     gridChanged();
     setStatus ("Bar lines realigned");
 }
@@ -1066,6 +1176,7 @@ void MainComponent::changeTempoOctave (bool doubleIt)
     if (analysis.has_value())
         grid.downbeatOffset = ops::guessDownbeatOffset (grid.beats, grid.beatsPerBar, *analysis);
     hasManualEdits = true;
+    refreshPreCount();   // the count-in follows the new tempo
     gridChanged();
     setStatus (juce::String (doubleIt ? "Tempo doubled" : "Tempo halved") + " - average now "
                + juce::String (grid.averageBpm(), 1) + " BPM");
@@ -1114,7 +1225,10 @@ void MainComponent::exportMidi()
         o.includeBarMarkers = markersToggle.getToggleState();
         o.songName = currentFile.getFileNameWithoutExtension();
 
-        const auto result = MidiExporter::exportToFile (grid, o, f);
+        const auto pc = currentPreCount();
+        const auto eg = ops::applyPreCount (grid, pc);
+        const auto el = eg.computeLayout();
+        const auto result = MidiExporter::exportToFile (eg, o, f);
         if (result.failed())
         {
             setStatus (result.getErrorMessage(), true);
@@ -1128,10 +1242,14 @@ void MainComponent::exportMidi()
         msg << "Saved " << f.getFileName() << "\n\n"
             << (int) grid.beats.size() << " beats, " << juce::String (grid.averageBpm(), 2) << " BPM average, "
             << grid.beatsPerBar << "/" << grid.denominator << ".\n";
-        if (layout.preRollBeats > 0)
-            msg << "The first " << layout.preRollBeats << " beat(s) are a lead-in covering the audio before the first detected beat.\n";
-        if (layout.pickupBeats > 0)
-            msg << "Bar 1 is a " << layout.pickupBeats << "/" << grid.denominator << " pickup bar so that bar 2 starts on the downbeat.\n";
+        if (pc.isActive())
+            msg << "Includes a " << pc.beats << "-beat pre-count: the audio must start "
+                << juce::String (pc.silenceSeconds(), 3) << " s later (" << (juce::int64) pc.silenceSamples << " samples at "
+                << juce::String (pc.sampleRate, 0) << " Hz). Use \"Pad audio folder\" to add this silence to the song and its stems.\n";
+        if (el.preRollBeats > 0)
+            msg << "The first " << el.preRollBeats << " beat(s) are a lead-in covering the audio before the first detected beat.\n";
+        if (el.pickupBeats > 0)
+            msg << "Bar 1 is a " << el.pickupBeats << "/" << grid.denominator << " pickup bar so that bar 2 starts on the downbeat.\n";
         msg << "\nIn Reaper: put the audio item at the very start of the project (0:00), then Insert > Media file... "
                "choose this MIDI file and answer Yes to \"import tempo map\". "
                "(Set the audio track's timebase to Time so it doesn't stretch.)";
@@ -1165,8 +1283,171 @@ void MainComponent::exportCsv()
         if (f == juce::File()) return;
         if (! f.hasFileExtension (".csv")) f = f.withFileExtension (".csv");
 
-        const auto r = MidiExporter::exportCsv (grid, f);
+        const auto r = MidiExporter::exportCsv (exportGrid(), f);
         setStatus (r.wasOk() ? "Exported " + f.getFileName() : r.getErrorMessage(), r.failed());
+    });
+}
+
+void MainComponent::exportMetronomeAudio()
+{
+    if (grid.isEmpty() || audioBuffer == nullptr)
+    {
+        setStatus ("Nothing to export yet - open and analyze a song first.", true);
+        return;
+    }
+
+    auto target = currentFile.getParentDirectory().getChildFile (currentFile.getFileNameWithoutExtension() + " - metronome.wav");
+    chooser = std::make_unique<juce::FileChooser> ("Export metronome audio", target, "*.wav");
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [this] (const juce::FileChooser& fc)
+    {
+        auto f = fc.getResult();
+        if (f == juce::File() || audioBuffer == nullptr || grid.isEmpty()) return;
+        if (! f.hasFileExtension (".wav;.wave")) f = f.withFileExtension (".wav");
+
+        const auto pc = currentPreCount();
+        const auto eg = ops::applyPreCount (grid, pc);
+        const auto r = AudioEngine::exportMetronome (eg.beats, downbeatFlags (eg), accentToggle.getToggleState(),
+                                                     fileSampleRate, audioBuffer->getNumSamples() + pc.silenceSamples, f);
+        if (r.failed())
+        {
+            setStatus (r.getErrorMessage(), true);
+            return;
+        }
+
+        setStatus ("Exported " + f.getFileName() + (pc.isActive() ? " (with " + juce::String (pc.beats) + "-beat pre-count)" : juce::String())
+                   + " - place it at 0:00 next to the song");
+    });
+}
+
+void MainComponent::padAudioFolder()
+{
+    const auto pc = currentPreCount();
+    if (busy || ! pc.isActive())
+    {
+        setStatus ("Choose a pre-count and analyze a song first.", true);
+        return;
+    }
+
+    chooser = std::make_unique<juce::FileChooser> ("Choose the folder with the audio files to pad", currentFile.getParentDirectory());
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [this, pc] (const juce::FileChooser& fc)
+    {
+        const auto folder = fc.getResult();
+        if (! folder.isDirectory())
+            return;
+
+        const auto sources = AudioPadder::findAudioFiles (formatManager, folder);
+        if (sources.isEmpty())
+        {
+            setStatus ("No audio files in " + folder.getFileName(), true);
+            return;
+        }
+
+        const auto dest = folder.getChildFile ("Pre-count " + juce::String (pc.beats) + (pc.beats == 1 ? " beat" : " beats"));
+
+        juce::String msg;
+        msg << "Prepend " << juce::String (pc.silenceSeconds(), 3) << " s of silence (" << pc.beats << " beats, "
+            << (juce::int64) pc.silenceSamples << " samples at " << juce::String (pc.sampleRate, 0) << " Hz) to "
+            << sources.size() << " file(s):\n\n";
+        for (int i = 0; i < sources.size(); ++i)
+        {
+            if (i == 15) { msg << "... and " << (sources.size() - 15) << " more\n"; break; }
+            msg << "  " << sources[i].getFileName() << "\n";
+        }
+        msg << "\nPadded WAV copies go into the sub-folder \"" << dest.getFileName() << "\" (existing files there are replaced). "
+               "The originals are not changed.\n\n"
+               "Don't include a metronome WAV that was already exported with this pre-count.";
+
+        juce::Component::SafePointer<MainComponent> safe (this);
+        juce::AlertWindow::showAsync (juce::MessageBoxOptions()
+                                          .withIconType (juce::MessageBoxIconType::QuestionIcon)
+                                          .withTitle ("Pad audio folder")
+                                          .withMessage (msg)
+                                          .withButton ("Pad files")
+                                          .withButton ("Cancel")
+                                          .withAssociatedComponent (this),
+                                      [safe, sources, dest, pc] (int button)
+                                      {
+                                          if (button == 1 && safe != nullptr)
+                                              safe->startPadding (sources, dest, pc);
+                                      });
+    });
+}
+
+void MainComponent::startPadding (juce::Array<juce::File> sources, juce::File dest, PreCount pc)
+{
+    if (busy)
+        return;
+
+    if (const auto r = dest.createDirectory(); r.failed())
+    {
+        setStatus ("Can't create " + dest.getFullPathName() + ": " + r.getErrorMessage(), true);
+        return;
+    }
+
+    engine.pause();
+    cancelRequested = false;
+    progress = 0.0f;
+    setBusy (true, "Padding " + juce::String (sources.size()) + " file(s)...");
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    pool.addJob ([this, safe, sources, dest, pc]
+    {
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+
+        const auto targets = AudioPadder::destinationsFor (sources, dest);
+        juce::StringArray errors;
+        int written = 0;
+
+        for (int i = 0; i < sources.size() && ! cancelRequested.load(); ++i)
+        {
+            const auto r = AudioPadder::padFile (formats, sources[i], targets[i], pc, [this, i, n = sources.size()] (float p)
+            {
+                progress = ((float) i + p) / (float) n;
+                return ! cancelRequested.load();
+            });
+
+            if (r.wasOk())                 ++written;
+            else if (! cancelRequested)    errors.add (sources[i].getFileName() + ": " + r.getErrorMessage());
+        }
+
+        const bool cancelled = cancelRequested.load();
+        juce::MessageManager::callAsync ([safe, dest, written, errors, cancelled, total = sources.size()]
+        {
+            if (safe == nullptr)
+                return;
+
+            safe->setBusy (false);
+
+            if (cancelled)
+            {
+                safe->setStatus ("Padding cancelled after " + juce::String (written) + " of " + juce::String (total) + " file(s).", true);
+                return;
+            }
+
+            safe->setStatus ("Padded " + juce::String (written) + " of " + juce::String (total) + " file(s) into " + dest.getFileName(),
+                             ! errors.isEmpty());
+
+            juce::String msg;
+            msg << written << " of " << total << " file(s) written to\n" << dest.getFullPathName() << "\n";
+            if (! errors.isEmpty())
+                msg << "\nFailed:\n" << errors.joinIntoString ("\n") << "\n";
+            msg << "\nIn Reaper, put these files, the metronome WAV and the MIDI tempo map (exported with the same "
+                   "pre-count) all at 0:00.";
+
+            juce::AlertWindow::showAsync (juce::MessageBoxOptions()
+                                              .withIconType (errors.isEmpty() ? juce::MessageBoxIconType::InfoIcon
+                                                                              : juce::MessageBoxIconType::WarningIcon)
+                                              .withTitle ("Audio folder padded")
+                                              .withMessage (msg)
+                                              .withButton ("OK")
+                                              .withButton ("Show in Finder")
+                                              .withAssociatedComponent (safe.getComponent()),
+                                          [dest] (int button) { if (button == 0) dest.revealToUser(); });
+        });
     });
 }
 
@@ -1234,18 +1515,18 @@ void MainComponent::setLoop (double start, double end, bool enabled)
 
 void MainComponent::jumpBeats (int delta, bool bars)
 {
-    if (grid.isEmpty()) return;
+    if (shownGrid.isEmpty()) return;
 
     const double pos = engine.getPosition();
-    int i = grid.beatIndexAtOrBefore (pos + (delta < 0 ? -0.02 : 0.0));
-    if (delta < 0 && i >= 0 && pos - grid.beats[(size_t) i] > 0.02)
+    int i = shownGrid.beatIndexAtOrBefore (pos + (delta < 0 ? -0.02 : 0.0));
+    if (delta < 0 && i >= 0 && pos - shownGrid.beats[(size_t) i] > 0.02)
         ++i; // first step back lands on the current beat
 
     int target = i;
     if (bars)
     {
         target = i + delta;
-        while (target > 0 && target < (int) grid.beats.size() - 1 && ! grid.isDownbeat (target))
+        while (target > 0 && target < (int) shownGrid.beats.size() - 1 && ! shownGrid.isDownbeat (target))
             target += delta > 0 ? 1 : -1;
     }
     else
@@ -1253,8 +1534,8 @@ void MainComponent::jumpBeats (int delta, bool bars)
         target = i + delta;
     }
 
-    target = juce::jlimit (0, (int) grid.beats.size() - 1, target);
-    engine.setPosition (grid.beats[(size_t) target]);
+    target = juce::jlimit (0, (int) shownGrid.beats.size() - 1, target);
+    engine.setPosition (shownGrid.beats[(size_t) target]);
 }
 
 //==============================================================================
@@ -1279,6 +1560,20 @@ void MainComponent::updateInfoLabels()
 {
     const auto lo = (int) rangeSlider.getMinValue(), hi = (int) rangeSlider.getMaxValue();
     rangeLabel.setText ("BPM " + juce::String (lo) + "-" + juce::String (hi), juce::dontSendNotification);
+
+    {
+        const int pcBeats = std::max (0, preCountBox.getSelectedId() - 1);
+        const auto pc = currentPreCount();
+        juce::String info;
+        if (pcBeats == 0)
+            info = "No count-in; exports start at the audio start";
+        else if (! pc.isActive())
+            info = "Analyze a song to compute the silence";
+        else
+            info << "Adds " << juce::String (pc.silenceSeconds(), 3) << " s of silence (" << (juce::int64) pc.silenceSamples
+                 << " samples @ " << juce::String (pc.sampleRate / 1000.0, 1) << " kHz)";
+        preCountInfoLabel.setText (info, juce::dontSendNotification);
+    }
 
     if (grid.isEmpty())
     {
@@ -1311,10 +1606,13 @@ void MainComponent::updateControlStates()
     exportButton.setEnabled (hasGrid && ! busy);
     exportMidiButton.setEnabled (hasGrid && ! busy);
     exportCsvButton.setEnabled (hasGrid && ! busy);
+    exportClickButton.setEnabled (hasGrid && hasAudio && ! busy);
+    padFolderButton.setEnabled (hasGrid && currentPreCount().isActive() && ! busy);
 
     for (auto* b : { &downbeatPrevButton, &downbeatNextButton, &doubleButton, &halveButton })
         b->setEnabled (hasGrid && ! busy);
     downbeatAutoButton.setEnabled (hasGrid && analysis.has_value() && ! busy);
+    halfBeatButton.setEnabled (analysis.has_value() && ! busy);
     undoButton.setEnabled (! undoStack.empty() && ! busy);
     redoButton.setEnabled (! redoStack.empty() && ! busy);
 
@@ -1338,7 +1636,11 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         {
             case 'O': showOpenDialog(); return true;
             case 'R': startAnalysis(); return true;
-            case 'E': if (mods.isShiftDown()) exportCsv(); else exportMidi(); return true;
+            case 'E':
+                if (mods.isAltDown())        exportMetronomeAudio();
+                else if (mods.isShiftDown()) exportCsv();
+                else                         exportMidi();
+                return true;
             case 'Z': if (mods.isShiftDown()) redo(); else undo(); return true;
             case '=': case '+': zoom (0.5); return true;
             case '-': zoom (2.0); return true;
@@ -1363,10 +1665,10 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key.isKeyCode (juce::KeyPress::leftKey) || key.isKeyCode (juce::KeyPress::rightKey))
     {
         const int dir = key.isKeyCode (juce::KeyPress::leftKey) ? -1 : 1;
-        if (sel >= 0 && sel < (int) grid.beats.size())
+        if (sel >= countInBeats() && sel < (int) shownGrid.beats.size())
         {
             pushUndo();
-            moveBeat (sel, grid.beats[(size_t) sel] + dir * (mods.isShiftDown() ? 0.010 : 0.001));
+            moveBeat (sel, shownGrid.beats[(size_t) sel] + dir * (mods.isShiftDown() ? 0.010 : 0.001));
             hasManualEdits = true;
             updateInfoLabels();
         }
@@ -1422,6 +1724,8 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             m.addSeparator();
             item (menuExportMidi, "Export MIDI tempo map...", "Cmd+E", hasGrid);
             item (menuExportCsv, "Export beats as CSV...", "Cmd+Shift+E", hasGrid);
+            item (menuExportClick, "Export metronome audio...", "Cmd+Option+E", hasGrid && hasAudio);
+            item (menuPadFolder, "Pad audio folder with pre-count...", {}, hasGrid && currentPreCount().isActive() && ! busy);
             m.addSeparator();
             item (menuAudioSettings, "Audio settings...", {});
             break;
@@ -1451,6 +1755,8 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             break;
         case 4:
             item (menuShortcuts, "Keyboard shortcuts && tips", {});
+            m.addSeparator();
+            item (menuAbout, "About Beat It", {});
             break;
         default: break;
     }
@@ -1466,6 +1772,8 @@ void MainComponent::menuItemSelected (int id, int)
         case menuAnalyze:           startAnalysis(); break;
         case menuExportMidi:        exportMidi(); break;
         case menuExportCsv:         exportCsv(); break;
+        case menuExportClick:       exportMetronomeAudio(); break;
+        case menuPadFolder:         padAudioFolder(); break;
         case menuAudioSettings:     showAudioSettings(); break;
         case menuUndo:              undo(); break;
         case menuRedo:              redo(); break;
@@ -1483,6 +1791,7 @@ void MainComponent::menuItemSelected (int id, int)
         case menuZoomOut:           zoom (2.0); break;
         case menuZoomFit:           zoomToFit(); break;
         case menuShortcuts:         showShortcuts(); break;
+        case menuAbout:             showAbout(); break;
         default: break;
     }
 }
@@ -1501,6 +1810,21 @@ void MainComponent::showAudioSettings()
     o.resizable = false;
     o.componentToCentreAround = this;
     o.launchAsync();
+}
+
+void MainComponent::showAbout()
+{
+    juce::AlertWindow::showAsync (juce::MessageBoxOptions()
+        .withIconType (juce::MessageBoxIconType::NoIcon)
+        .withTitle ("Beat It " + appVersion)
+        .withMessage ("Variable-tempo mapper -> MIDI tempo map.\n\n"
+                      "Beat tracking: BTrack (Adam Stark, GPL-3)\n"
+                      "Resampling: libsamplerate\n"
+                      "Built with JUCE " + juce::SystemStats::getJUCEVersion().fromFirstOccurrenceOf ("v", false, false) + "\n\n"
+                      "Licensed under the GPL-3.")
+        .withButton ("OK")
+        .withAssociatedComponent (this),
+        nullptr);
 }
 
 void MainComponent::showShortcuts()

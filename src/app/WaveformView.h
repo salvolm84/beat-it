@@ -14,7 +14,10 @@ public:
     ~WaveformView() override;
 
     void setAudio (const juce::AudioBuffer<float>* buffer, double sampleRate);
-    void setGrid (const beatit::BeatGrid* grid, const beatit::GridLayout* layout);
+    /** lockedBeats: leading beats (a pre-count) that are drawn dimmed and can't be edited. */
+    void setGrid (const beatit::BeatGrid* grid, const beatit::GridLayout* layout, int lockedBeats = 0);
+    /** Time on the timeline where the audio starts (pre-count silence before it). */
+    void setAudioOffset (double seconds);
     void setVisibleRange (double start, double end);
     void setPlayhead (double seconds);
     void setLoop (double start, double end, bool enabled);
@@ -62,6 +65,8 @@ private:
     juce::AudioThumbnail thumbnail { 256, formatManager, thumbCache };
     const juce::AudioBuffer<float>* audio = nullptr;
     double sampleRate = 44100.0;
+    double audioOffset = 0.0;
+    int lockedBeats = 0;
 
     const beatit::BeatGrid* grid = nullptr;
     const beatit::GridLayout* layout = nullptr;

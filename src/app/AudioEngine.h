@@ -17,6 +17,12 @@ public:
     void setAudio (std::shared_ptr<const juce::AudioBuffer<float>> buffer, double fileSampleRate);
     void setBeats (std::vector<double> beatTimes, std::vector<bool> downbeatFlags);
 
+    /** Silence (in samples at the file's rate) played before the audio, e.g. a pre-count.
+        Positions, beats and the loop are all on this padded timeline. The playhead keeps
+        its place in the music when this changes. */
+    void setLeadIn (long long samples);
+    long long getLeadIn() const noexcept   { return leadIn.load(); }
+
     void play();
     void pause();
     void stop();            ///< pause + return to start
@@ -39,6 +45,20 @@ public:
 
     /** Peak level of the last block (for a meter), 0..1+ */
     float getOutputLevel() const noexcept  { return outputLevel.load(); }
+
+    //==============================================================================
+    /** Renders the metronome alone, offline: the same click sound as playback, but
+        sub-sample accurate. dest[n] is the signal at time (startSample + n) / sampleRate.
+        Can be called block by block. */
+    static void renderMetronome (const std::vector<double>& beatTimes, const std::vector<bool>& downbeatFlags,
+                                 bool accentDownbeats, double sampleRate, juce::int64 startSample,
+                                 float* dest, int numSamples, float gain = 1.0f);
+
+    /** Writes the metronome as a mono 24-bit WAV, normalised to a 0 dBFS peak, of exactly numSamples at sampleRate
+        (pass the song's length and rate so the file lines up with it at 0:00). */
+    static juce::Result exportMetronome (const std::vector<double>& beatTimes, const std::vector<bool>& downbeatFlags,
+                                         bool accentDownbeats, double sampleRate, juce::int64 numSamples,
+                                         const juce::File& file);
 
     //==============================================================================
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
@@ -76,6 +96,8 @@ private:
     std::atomic<double> loopStart { 0.0 }, loopEnd { 0.0 };
     std::atomic<bool> loopOn { false };
     std::atomic<bool> resyncBeats { false };
+    std::atomic<long long> leadIn { 0 };
+    int audioSamples = 0;   // guarded by dataLock
 
     // audio-thread state
     double readPos = 0.0;       // in file samples

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioEngine.h"
+#include "AudioPadder.h"
 #include "BeatAnalyzer.h"
 #include "MidiExporter.h"
 #include "TempoCurveView.h"
@@ -79,7 +80,7 @@ private:
     void onAudioLoaded (std::shared_ptr<juce::AudioBuffer<float>> buffer, double sampleRate, const juce::File& file, int generation);
     void startAnalysis();
     void onAnalysisFinished (std::optional<beatit::AnalysisResult> result, int generation);
-    void reprocess (bool pushUndoFirst);
+    void reprocess (bool pushUndoFirst, bool reguessBarStarts = false);
     void readProcessingOptionsFromUI();
 
     // grid editing
@@ -87,6 +88,7 @@ private:
     void undo();
     void redo();
     void gridChanged();
+    static std::vector<bool> downbeatFlags (const beatit::BeatGrid&);
     void moveBeat (int index, double t);
     void addBeat (double t);
     void deleteBeat (int index);
@@ -99,6 +101,21 @@ private:
     // export
     void exportMidi();
     void exportCsv();
+    void exportMetronomeAudio();
+    void padAudioFolder();
+    void startPadding (juce::Array<juce::File> sources, juce::File destFolder, beatit::PreCount preCount);
+    beatit::PreCount currentPreCount() const   { return preCount; }
+    beatit::BeatGrid exportGrid() const        { return shownGrid; }
+
+    // pre-count timeline: the editor, playback and exports show the song delayed by the
+    // pre-count silence with the count-in beats in front. `grid` stays in song time.
+    int    selectedPreCountBeats() const;
+    int    countInBeats() const noexcept        { return preCount.isActive() ? preCount.beats : 0; }
+    double timelineOffset() const noexcept      { return preCount.isActive() ? preCount.silenceSeconds() : 0.0; }
+    double songDuration() const;
+    void   refreshPreCount();                   ///< recompute the silence from the grid + selected beats
+    void   setPreCount (beatit::PreCount pc);
+    void   updateShownGrid();
 
     // transport / view
     void togglePlay();
@@ -120,6 +137,7 @@ private:
     void saveSettings();
     void showAudioSettings();
     void showShortcuts();
+    void showAbout();
 
     //==============================================================================
     BeatItLookAndFeel lnf;
@@ -141,7 +159,13 @@ private:
     beatit::ProcessingOptions procOptions;
     beatit::BeatGrid grid;
     beatit::GridLayout layout;
-    std::vector<beatit::BeatGrid> undoStack, redoStack;
+    beatit::PreCount preCount;                  ///< silence amount, fixed until the setting or the tempo changes
+    beatit::BeatGrid shownGrid;                 ///< grid with the pre-count applied (timeline time)
+    beatit::GridLayout shownLayout;
+
+    struct DocState { beatit::BeatGrid grid; beatit::PreCount preCount; };
+    std::vector<DocState> undoStack, redoStack;
+    void restoreState (const DocState&);
     bool hasManualEdits = false;
     int loadGeneration = 0;
 
@@ -192,16 +216,19 @@ private:
     juce::Label timeSigLabel, downbeatLabel, tempoOctaveLabel, gridInfoLabel, editHintLabel;
     juce::ComboBox numeratorBox, denominatorBox;
     juce::TextButton downbeatPrevButton { "<" }, downbeatNextButton { ">" }, downbeatAutoButton { "Auto" },
+                     halfBeatButton { juce::CharPointer_UTF8 ("\xc2\xbd beat") },
                      doubleButton { "x2" }, halveButton { "/2" }, undoButton { "Undo" }, redoButton { "Redo" };
 
     juce::Label musicLabel, clickLabel, speedLabel;
     juce::Slider musicSlider, clickSlider, speedSlider;
     juce::ToggleButton muteToggle { "Mute" }, metronomeToggle { "Metronome" }, accentToggle { "Accent bar starts" };
 
-    juce::Label ppqLabel;
-    juce::ComboBox ppqBox;
+    juce::Label ppqLabel, preCountLabel, preCountInfoLabel;
+    juce::ComboBox ppqBox, preCountBox;
     juce::ToggleButton clickTrackToggle { "Include click note track" }, markersToggle { "Include bar markers" };
-    juce::TextButton exportMidiButton { "Export MIDI tempo map..." }, exportCsvButton { "CSV..." };
+    juce::TextButton exportMidiButton { "Export MIDI tempo map..." }, exportCsvButton { "CSV..." },
+                     exportClickButton { "Export metronome audio..." },
+                     padFolderButton { "Pad audio folder with pre-count..." };
 
     // status bar
     juce::Label statusLabel;

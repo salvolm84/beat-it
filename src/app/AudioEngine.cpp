@@ -1,7 +1,19 @@
 #include "AudioEngine.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 #include <algorithm>
 #include <cmath>
+#include <limits>
+
+namespace
+{
+    // click sound, shared by playback and offline rendering
+    constexpr double clickLength = 0.06;          // seconds
+    constexpr double clickDecay  = 0.012;         // envelope time constant, seconds
+    constexpr double accentFreq = 1760.0, normalFreq = 1100.0;
+    constexpr double accentGain = 1.0,    normalGain = 0.65;
+}
 
 AudioEngine::AudioEngine()  = default;
 AudioEngine::~AudioEngine() = default;
@@ -10,15 +22,33 @@ void AudioEngine::setAudio (std::shared_ptr<const juce::AudioBuffer<float>> buff
 {
     pause();
 
-    const double dur = (buffer != nullptr && rate > 0.0) ? buffer->getNumSamples() / rate : 0.0;
     {
         const juce::SpinLock::ScopedLockType sl (dataLock);
+        audioSamples = buffer != nullptr ? buffer->getNumSamples() : 0;
         audio = std::move (buffer);
         fileRate = rate > 0.0 ? rate : 44100.0;
+        leadIn.store (0);
+        durationSeconds.store (audioSamples / fileRate);
     }
 
-    durationSeconds.store (dur);
     setPosition (0.0);
+}
+
+void AudioEngine::setLeadIn (long long samples)
+{
+    samples = std::max (0LL, samples);
+    long long delta;
+    double rate;
+    {
+        const juce::SpinLock::ScopedLockType sl (dataLock);
+        delta = samples - leadIn.load();
+        rate = fileRate;
+        leadIn.store (samples);
+        durationSeconds.store (audioSamples > 0 ? (double) (audioSamples + samples) / fileRate : 0.0);
+    }
+
+    if (delta != 0)
+        setPosition (positionSeconds.load() + (double) delta / rate);
 }
 
 void AudioEngine::setBeats (std::vector<double> times, std::vector<bool> downbeats)
@@ -76,10 +106,10 @@ void AudioEngine::triggerClick (bool isDownbeat)
 {
     const bool acc = accent.load() && isDownbeat;
     voice.phase = 0.0;
-    voice.freq = acc ? 1760.0 : 1100.0;
-    voice.gain = acc ? 1.0 : 0.65;
+    voice.freq = acc ? accentFreq : normalFreq;
+    voice.gain = acc ? accentGain : normalGain;
     voice.env = 1.0;
-    voice.samplesLeft = (int) (0.06 * outputRate);
+    voice.samplesLeft = (int) (clickLength * outputRate);
 }
 
 float AudioEngine::renderClickSample()
@@ -87,7 +117,7 @@ float AudioEngine::renderClickSample()
     if (voice.samplesLeft <= 0)
         return 0.0f;
 
-    const double decay = std::exp (-1.0 / (0.012 * outputRate));
+    const double decay = std::exp (-1.0 / (clickDecay * outputRate));
     const auto s = (float) (std::sin (voice.phase) * voice.env * voice.gain);
     voice.phase += juce::MathConstants<double>::twoPi * voice.freq / outputRate;
     voice.env *= decay;
@@ -102,6 +132,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
     std::shared_ptr<const juce::AudioBuffer<float>> buf;
     std::shared_ptr<const BeatData> beats;
     double rate;
+    double lead;   // in file samples
     {
         const juce::SpinLock::ScopedTryLockType sl (dataLock);
         if (! sl.isLocked())
@@ -109,6 +140,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
         buf = audio;
         beats = beatData;
         rate = fileRate;
+        lead = (double) leadIn.load();
     }
 
     auto syncBeatIndex = [&] (double timeSeconds)
@@ -157,10 +189,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
             syncBeatIndex (lStart / rate);
         }
 
-        if (readPos >= numFileSamples - 2)
+        if (readPos >= lead + numFileSamples - 2)
         {
             playing.store (false);
-            readPos = numFileSamples;
+            readPos = lead + numFileSamples;
             break;
         }
 
@@ -180,15 +212,16 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
 
         const float click = renderClickSample() * smoothedClickGain;
 
-        // cubic Hermite interpolation
-        const int i1 = (int) readPos;
-        const auto frac = (float) (readPos - i1);
-        const int i0 = std::max (0, i1 - 1), i2 = std::min (numFileSamples - 1, i1 + 1), i3 = std::min (numFileSamples - 1, i1 + 2);
+        // cubic Hermite interpolation; the lead-in (and anything outside the file) is silence
+        const double audioPos = readPos - lead;
+        const int i1 = (int) std::floor (audioPos);
+        const auto frac = (float) (audioPos - i1);
 
         for (int ch = 0; ch < numOut; ++ch)
         {
             const float* src = buf->getReadPointer (std::min (ch, numFileChannels - 1));
-            const float y0 = src[i0], y1 = src[i1], y2 = src[i2], y3 = src[i3];
+            auto at = [&] (int i) { return i >= 0 && i < numFileSamples ? src[i] : 0.0f; };
+            const float y0 = at (i1 - 1), y1 = at (i1), y2 = at (i1 + 1), y3 = at (i1 + 2);
             const float c1 = 0.5f * (y2 - y0);
             const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
             const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
@@ -207,4 +240,91 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& info)
     // don't clobber a seek requested by the UI during this block
     if (pendingSeek.load() < 0.0)
         positionSeconds.store (std::min (readPos / rate, durationSeconds.load()));
+}
+
+//==============================================================================
+void AudioEngine::renderMetronome (const std::vector<double>& times, const std::vector<bool>& downbeats,
+                                   bool accentDownbeats, double rate, juce::int64 startSample,
+                                   float* dest, int numSamples, float gain)
+{
+    std::fill (dest, dest + numSamples, 0.0f);
+    if (rate <= 0.0 || numSamples <= 0)
+        return;
+
+    const juce::int64 endSample = startSample + numSamples;
+    const double blockStart = (double) startSample / rate, blockEnd = (double) endSample / rate;
+    const double twoPi = juce::MathConstants<double>::twoPi;
+
+    // first click that can still be sounding at the start of the block
+    auto i = (size_t) std::distance (times.begin(), std::lower_bound (times.begin(), times.end(), blockStart - clickLength));
+
+    for (; i < times.size() && times[i] < blockEnd; ++i)
+    {
+        const double t0 = times[i];
+        // like playback, one voice: a click is cut off by the next one
+        const double tEnd = std::min (t0 + clickLength, i + 1 < times.size() ? times[i + 1] : std::numeric_limits<double>::max());
+
+        const bool acc = accentDownbeats && i < downbeats.size() && downbeats[i];
+        const double freq = acc ? accentFreq : normalFreq;
+        const double g = (acc ? accentGain : normalGain) * gain;
+
+        const auto first = std::max (startSample, (juce::int64) std::ceil (t0 * rate));
+        const auto last  = std::min (endSample,   (juce::int64) std::ceil (tEnd * rate));
+
+        for (auto n = first; n < last; ++n)
+        {
+            const double dt = std::max (0.0, (double) n / rate - t0);
+            dest[n - startSample] += (float) (g * std::sin (twoPi * freq * dt) * std::exp (-dt / clickDecay));
+        }
+    }
+}
+
+juce::Result AudioEngine::exportMetronome (const std::vector<double>& times, const std::vector<bool>& downbeats,
+                                           bool accentDownbeats, double rate, juce::int64 numSamples,
+                                           const juce::File& file)
+{
+    if (rate <= 0.0 || numSamples <= 0)
+        return juce::Result::fail ("Nothing to render.");
+
+    juce::TemporaryFile temp (file);
+    std::unique_ptr<juce::OutputStream> stream = temp.getFile().createOutputStream();
+    if (stream == nullptr)
+        return juce::Result::fail ("Couldn't write to " + file.getFullPathName());
+
+    juce::WavAudioFormat wav;
+    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}
+                                                   .withSampleRate (rate)
+                                                   .withNumChannels (1)
+                                                   .withBitsPerSample (24));
+    if (writer == nullptr)
+        return juce::Result::fail ("Couldn't create a WAV writer at " + juce::String (rate) + " Hz.");
+
+    constexpr int blockSize = 65536;
+    juce::AudioBuffer<float> block (1, blockSize);
+
+    // pass 1: find the peak, so the file can be normalised to exactly 0 dBFS
+    float peak = 0.0f;
+    for (juce::int64 pos = 0; pos < numSamples; pos += blockSize)
+    {
+        const int n = (int) std::min ((juce::int64) blockSize, numSamples - pos);
+        renderMetronome (times, downbeats, accentDownbeats, rate, pos, block.getWritePointer (0), n);
+        peak = std::max (peak, block.getMagnitude (0, 0, n));
+    }
+    const float gain = peak > 0.0f ? 1.0f / peak : 1.0f;
+
+    // pass 2: render normalised and write
+    for (juce::int64 pos = 0; pos < numSamples; pos += blockSize)
+    {
+        const int n = (int) std::min ((juce::int64) blockSize, numSamples - pos);
+        renderMetronome (times, downbeats, accentDownbeats, rate, pos, block.getWritePointer (0), n, gain);
+        if (! writer->writeFromAudioSampleBuffer (block, 0, n))
+            return juce::Result::fail ("Error while writing " + file.getFileName());
+    }
+
+    writer.reset();   // flushes and closes the stream
+
+    if (! temp.overwriteTargetFileWithTemporary())
+        return juce::Result::fail ("Couldn't replace " + file.getFullPathName());
+
+    return juce::Result::ok();
 }

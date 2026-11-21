@@ -36,10 +36,28 @@ The app is at `build/BeatIt_artefacts/Release/Beat It.app`.
 3. **Fix** anything that's off:
    * Wrong tempo octave (twice or half the real tempo): use **/2** / **x2**, or narrow the BPM range.
    * Bars start on the wrong beat: use **Bar start < >** or **Auto**, or right-click a beat → *Set as bar start*.
+   * Grid on the off-beats (beat lines between the kick and bass hits, common in reggae, ska and swing): click
+     **½ beat** to move every beat by half a beat. The moved beats are snapped to transients again. Then check the bar start.
    * Individual beats: drag them (hold Cmd for fine moves), double-click to add, Option-click to delete.
      During playback, press **B** to add a beat at the playhead. Undo/redo with Cmd+Z / Cmd+Shift+Z.
    * Song played to a click? Tick **Constant tempo**.
 4. **Export MIDI tempo map…**
+   * **Export metronome audio…** (Cmd+Option+E) also writes the click alone as a mono 24-bit WAV.
+     It has the same sample rate and length as the song, so it lines up when placed at 0:00. It is
+     normalised to a 0 dBFS peak. Bar starts are accented if *Accent bar starts* is ticked.
+5. **Optional pre-count (count-in).** Set **Pre-count** in the Export panel to 1–16 beats. All exports
+   (MIDI, CSV, metronome WAV) then start with that many extra beats at the song's opening tempo. The panel
+   shows the exact silence this adds (seconds and samples).
+   * The editor shows it straight away: the song moves right by the silence, and a shaded *Pre-count* region holds the
+     count-in beats. They're dimmed and follow the song's first beats, so they can't be edited directly. Playback
+     includes the silence, and the metronome clicks the count-in.
+   * The silence amount stays fixed while you edit beats. It is only recalculated when you change the pre-count,
+     re-analyze, change the processing options or use x2 / /2, so files you have already padded stay in sync.
+   * The audio has to be delayed by the same amount. **Pad audio folder with pre-count…** takes every audio
+     file directly in a folder (sub-folders are skipped), puts that silence in front of each one, and writes WAV copies
+     to a `Pre-count N beats` sub-folder. Originals are left alone. Sample rate, channel count and bit depth are kept.
+   * In Reaper, drop the padded files, the metronome WAV and the MIDI tempo map at 0:00. They all line up.
+     Don't pad a metronome WAV that was already exported with the pre-count.
 
 ### Importing into Reaper
 

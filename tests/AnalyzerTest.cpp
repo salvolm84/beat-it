@@ -9,6 +9,7 @@
 #include "MidiExporter.h"
 #include "TempoMap.h"
 #include "AudioEngine.h"
+#include "AudioPadder.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <cmath>
@@ -355,6 +356,257 @@ void testLayoutEdgeCases()
 /** Regression: the backward pass locks onto the offbeats for a while (seen on a real
     song around a breakdown). The merge must not interleave both passes into a
     double-tempo sequence. */
+/** Exports the metronome as a WAV and checks length, sample rate, click timing and accents. */
+void testMetronomeExport()
+{
+    std::printf ("\n=== metronome audio export ===\n");
+
+    const double rate = 48000.0;
+    const juce::int64 numSamples = (juce::int64) (rate * 6.0) + 123;
+
+    std::vector<double> beats;
+    for (double t = 0.2371; t < 5.8; t += 0.45 + 0.0137 * (double) beats.size()) beats.push_back (t);
+    std::vector<bool> downs (beats.size());
+    for (size_t i = 0; i < beats.size(); ++i) downs[i] = i % 3 == 0;
+
+    juce::TemporaryFile temp (".wav");
+    const auto r = AudioEngine::exportMetronome (beats, downs, true, rate, numSamples, temp.getFile());
+    check (r.wasOk(), "metronome WAV written " + r.getErrorMessage());
+
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (temp.getFile().createInputStream().release(), true));
+    check (reader != nullptr, "metronome WAV readable");
+    if (reader == nullptr)
+        return;
+
+    check (reader->lengthInSamples == numSamples && reader->sampleRate == rate && reader->numChannels == 1,
+           "WAV is mono, " + juce::String (reader->lengthInSamples) + " samples at " + juce::String (reader->sampleRate) + " Hz");
+
+    juce::AudioBuffer<float> buf (1, (int) reader->lengthInSamples);
+    reader->read (&buf, 0, buf.getNumSamples(), 0, true, false);
+    const float* d = buf.getReadPointer (0);
+
+    // onset = first sample above threshold after silence, extrapolated back to the zero crossing
+    std::vector<double> onsets;
+    std::vector<float> peaks;
+    int silent = 100000;
+    for (int i = 0; i + 1 < buf.getNumSamples(); ++i)
+    {
+        if (std::abs (d[i]) > 1.0e-4f)
+        {
+            if (silent > (int) (0.02 * rate))
+            {
+                const double slope = d[i + 1] - d[i];
+                onsets.push_back ((i - (slope != 0.0 ? d[i] / slope : 0.0)) / rate);
+                peaks.push_back (0.0f);
+            }
+            peaks.back() = std::max (peaks.back(), std::abs (d[i]));
+            silent = 0;
+        }
+        else ++silent;
+    }
+
+    double maxErr = 0.0;
+    bool accentsOk = true, levelOk = true;
+    const bool countOk = onsets.size() == beats.size();
+    if (countOk)
+        for (size_t i = 0; i < beats.size(); ++i)
+        {
+            maxErr = std::max (maxErr, std::abs (onsets[i] - beats[i]));
+            accentsOk = accentsOk && (downs[i] ? peaks[i] > 0.9f : peaks[i] < 0.7f);
+            levelOk = levelOk && peaks[i] <= 1.0f;
+        }
+
+    check (countOk && maxErr < 0.25 / rate,
+           juce::String ((int) onsets.size()) + "/" + juce::String ((int) beats.size())
+           + " clicks, max error " + juce::String (maxErr * rate, 3) + " samples");
+    const float filePeak = buf.getMagnitude (0, 0, buf.getNumSamples());
+    check (accentsOk && levelOk && filePeak > 0.9999f,
+           "bar starts accented, normalised to " + juce::String (juce::Decibels::gainToDecibels (filePeak), 4) + " dBFS peak");
+}
+
+/** Pre-count: shifted grid, MIDI alignment, metronome length and padded stems all agree. */
+void testPreCount()
+{
+    std::printf ("\n=== pre-count ===\n");
+
+    const double songRate = 48000.0;
+    BeatGrid grid;
+    for (double t = 0.731; t < 20.0; t += 0.5 + 0.002 * (double) grid.beats.size()) grid.beats.push_back (t);
+    grid.beatsPerBar = 4;
+    grid.downbeatOffset = 2;   // pickup of 2 beats
+
+    for (int n : { 1, 3, 4, 7 })
+    {
+        const auto pc = ops::computePreCount (grid, n, songRate);
+        const auto eg = ops::applyPreCount (grid, pc);
+        const double s = pc.silenceSeconds();
+        const double expected = n * (grid.beats[4] - grid.beats[0]) / 4.0;
+
+        bool shiftOk = eg.beats.size() == grid.beats.size() + (size_t) n && std::abs (s - expected) <= 0.5 / songRate
+                    && std::abs (s * songRate - (double) pc.silenceSamples) < 1.0e-6;
+        for (size_t i = 0; shiftOk && i < grid.beats.size(); ++i)
+            shiftOk = std::abs (eg.beats[i + (size_t) n] - (grid.beats[i] + s)) < 1.0e-9
+                   && eg.isDownbeat ((int) i + n) == grid.isDownbeat ((int) i);
+        for (int k = 0; shiftOk && k < n; ++k)
+            shiftOk = std::abs ((eg.beats[(size_t) k + 1] - eg.beats[(size_t) k]) - s / n) < 1.0e-9 && eg.beats[0] == grid.beats[0];
+
+        int timeSigs = 0, tempos = 0;
+        auto midiTimes = midiClickTimes (MidiExporter::build (eg, MidiExportOptions{}), timeSigs, tempos);
+        double maxErr = 0.0;
+        const bool countOk = midiTimes.size() == eg.beats.size();
+        for (size_t i = 0; countOk && i < midiTimes.size(); ++i)
+            maxErr = std::max (maxErr, std::abs (midiTimes[i] - eg.beats[i]));
+
+        const auto el = eg.computeLayout();
+        const bool barOk = grid.barAndBeatOfDetected (grid.firstDownbeatIndex(), grid.computeLayout()).second == 1
+                        && eg.barAndBeatOfDetected (grid.firstDownbeatIndex() + n, el).second == 1;
+
+        check (shiftOk && countOk && maxErr < 0.0005 && barOk,
+               juce::String (n) + " beats: silence " + juce::String (s, 4) + " s (" + juce::String ((juce::int64) pc.silenceSamples)
+               + " samples), MIDI max error " + juce::String (maxErr * 1000.0, 4) + " ms, bar start kept");
+    }
+
+    // padding: same-rate files get the exact sample count, others the nearest sample
+    const auto pc = ops::computePreCount (grid, 4, songRate);
+    juce::TemporaryFile dir;
+    dir.getFile().createDirectory();
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+
+    struct Src { const char* name; double rate; int channels, bits; };
+    for (const auto& src : { Src { "song", 48000.0, 2, 24 }, Src { "stem", 44100.0, 1, 16 } })
+    {
+        const int len = (int) (src.rate * 1.5) + 7;
+        juce::AudioBuffer<float> in (src.channels, len);
+        for (int ch = 0; ch < src.channels; ++ch)
+            for (int i = 0; i < len; ++i)
+                in.setSample (ch, i, 0.5f * (float) std::sin (0.01 * i + ch));
+
+        const auto srcFile = dir.getFile().getChildFile (juce::String (src.name) + ".wav");
+        {
+            std::unique_ptr<juce::OutputStream> os (srcFile.createOutputStream().release());
+            juce::WavAudioFormat wav;
+            auto w = wav.createWriterFor (os, juce::AudioFormatWriterOptions{}.withSampleRate (src.rate)
+                                                  .withNumChannels (src.channels).withBitsPerSample (src.bits));
+            w->writeFromAudioSampleBuffer (in, 0, len);
+        }
+
+        const auto outFile = dir.getFile().getChildFile ("out").getChildFile (juce::String (src.name) + ".wav");
+        outFile.getParentDirectory().createDirectory();
+        const auto r = AudioPadder::padFile (formats, srcFile, outFile, pc);
+
+        std::unique_ptr<juce::AudioFormatReader> rd (formats.createReaderFor (outFile));
+        const auto silence = pc.silenceSamplesAt (src.rate);
+        bool ok = r.wasOk() && rd != nullptr && rd->sampleRate == src.rate && (int) rd->numChannels == src.channels
+               && (int) rd->bitsPerSample == src.bits && rd->lengthInSamples == len + silence
+               && silence == std::llround (pc.silenceSeconds() * src.rate);
+        if (ok)
+        {
+            juce::AudioBuffer<float> out (src.channels, (int) rd->lengthInSamples);
+            rd->read (&out, 0, out.getNumSamples(), 0, true, true);
+            const float tol = src.bits == 16 ? 1.0e-4f : 1.0e-6f;
+            for (int ch = 0; ok && ch < src.channels; ++ch)
+            {
+                ok = out.getMagnitude (ch, 0, (int) silence) == 0.0f;
+                for (int i = 0; ok && i < len; ++i)
+                    ok = std::abs (out.getSample (ch, (int) silence + i) - in.getSample (ch, i)) < tol;
+            }
+        }
+        check (ok, juce::String (src.name) + " @ " + juce::String (src.rate, 0) + " Hz: +" + juce::String ((juce::int64) silence)
+                   + " samples of silence, audio intact " + r.getErrorMessage());
+    }
+
+    // file discovery: top-level audio files only, name collisions get distinct outputs
+    dir.getFile().getChildFile ("notes.txt").replaceWithText ("x");
+    dir.getFile().getChildFile ("song.aiff").replaceWithText ("x");
+    const auto found = AudioPadder::findAudioFiles (formats, dir.getFile());
+    const auto dests = AudioPadder::destinationsFor (found, dir.getFile().getChildFile ("out"));
+    juce::StringArray names;
+    for (const auto& d : dests) names.add (d.getFileName());
+    check (found.size() == 3 && names.joinIntoString (",") == "song (aiff).wav,song (wav).wav,stem.wav",
+           "found " + juce::String (found.size()) + " top-level audio files -> " + names.joinIntoString (", "));
+
+    dir.getFile().deleteRecursively();
+}
+
+/** Playback with a pre-count lead-in: audio is delayed by exactly the silence, the count-in clicks. */
+void testEngineLeadIn()
+{
+    std::printf ("\n=== playback with pre-count lead-in ===\n");
+
+    const double rate = 48000.0;
+    auto audio = std::make_shared<juce::AudioBuffer<float>> (1, (int) (rate * 3.0));
+    audio->clear();
+    const int impulseAt = 12345;
+    audio->setSample (0, impulseAt, 1.0f);
+
+    BeatGrid grid;
+    for (double t = 0.5; t < 2.9; t += 0.5) grid.beats.push_back (t);
+    const auto pc = ops::computePreCount (grid, 2, rate);   // 1.0 s
+    const auto shown = ops::applyPreCount (grid, pc);
+
+    AudioEngine engine;
+    engine.prepareToPlay (512, rate);
+    engine.setAudio (audio, rate);
+    engine.setPosition (1.0);
+    engine.setLeadIn (pc.silenceSamples);
+    const bool posKept = std::abs (engine.getPosition() - (1.0 + pc.silenceSeconds())) < 1.0e-9
+                      && std::abs (engine.getDuration() - (3.0 + pc.silenceSeconds())) < 1.0e-9;
+    engine.setPosition (0.0);
+
+    std::vector<bool> downs (shown.beats.size(), false);
+    engine.setBeats (shown.beats, downs);
+
+    // music only: the impulse must come out exactly silenceSamples later
+    engine.setMusicGain (1.0f);
+    engine.setMetronomeEnabled (false);
+    engine.play();
+    const int total = (int) (rate * 4.5);
+    juce::AudioBuffer<float> out (1, total), block (1, 512);
+    out.clear();
+    for (int pos = 0; pos < total; pos += 512)
+    {
+        block.clear();
+        juce::AudioSourceChannelInfo info (&block, 0, 512);
+        engine.getNextAudioBlock (info);
+        out.copyFrom (0, pos, block, 0, 0, std::min (512, total - pos));
+    }
+
+    int peakAt = -1;
+    float peak = 0.0f;
+    for (int i = 0; i < total; ++i)
+        if (std::abs (out.getSample (0, i)) > peak) { peak = std::abs (out.getSample (0, i)); peakAt = i; }
+
+    // music smoothing ramps the gain from its default, so only the position is checked
+    check (posKept && peakAt == impulseAt + (int) pc.silenceSamples,
+           "audio delayed by " + juce::String ((juce::int64) pc.silenceSamples) + " samples (impulse at "
+           + juce::String (peakAt) + "), playhead kept its place in the music");
+}
+
+/** Half-beat shift moves the grid onto the off-beats and keeps the tempo. */
+void testHalfBeatShift()
+{
+    std::printf ("\n=== half-beat shift ===\n");
+
+    std::vector<double> beats;
+    for (double t = 0.4; t < 10.0; t += 0.6 + 0.001 * (double) beats.size()) beats.push_back (t);
+    const auto shifted = ops::shiftHalfBeat (beats);
+
+    bool ok = shifted.size() == beats.size() + 1 && std::abs (shifted[0] - (beats[0] - 0.5 * (beats[1] - beats[0]))) < 1.0e-12;
+    for (size_t i = 0; ok && i + 1 < beats.size(); ++i)
+        ok = std::abs (shifted[i + 1] - 0.5 * (beats[i] + beats[i + 1])) < 1.0e-12;
+    ok = ok && shifted.back() > beats.back();
+
+    const auto twice = ops::shiftHalfBeat (ops::shiftHalfBeat (beats));
+    double maxErr = 0.0;   // two half shifts = one whole beat, so the interior must line up again
+    for (size_t i = 2; i + 2 < beats.size(); ++i)
+        maxErr = std::max (maxErr, std::abs (twice[i] - beats[i]));   // 2nd shift adds no beat in front (< 0)
+
+    check (ok && maxErr < 0.002, "midpoints + one beat in front; two shifts land back on the grid (max "
+                                 + juce::String (maxErr * 1000.0, 3) + " ms)");
+}
+
 void testMergeOffbeatPasses()
 {
     std::printf ("\n=== merge: passes half a beat apart ===\n");
@@ -605,7 +857,9 @@ int dumpFile (const juce::File& file)
     if (! res) return 1;
 
     BeatGrid g;
-    g.beats = ops::process (*res, {});
+    ProcessingOptions po;
+    po.halfBeatShift = juce::SystemStats::getEnvironmentVariable ("BEATIT_HALF", "").isNotEmpty();
+    g.beats = ops::process (*res, po);
     g.downbeatOffset = ops::guessDownbeatOffset (g.beats, 4, *res);
     const auto layout = g.computeLayout();
 
@@ -695,6 +949,10 @@ int main (int argc, char** argv)
 
     testLayoutEdgeCases();
     testMetronome();
+    testMetronomeExport();
+    testPreCount();
+    testEngineLeadIn();
+    testHalfBeatShift();
     testMergeOffbeatPasses();
     testMergeDoubleTempoIntro();
     testMergeColdStart();

@@ -123,6 +123,48 @@ int BeatGrid::nearestBeat (double t, double tol) const noexcept
     return best;
 }
 
+long long PreCount::silenceSamplesAt (double rate) const noexcept
+{
+    // llround makes this exact when the rates match
+    return sampleRate > 0.0 ? std::llround ((double) silenceSamples * rate / sampleRate) : 0;
+}
+
+PreCount ops::computePreCount (const BeatGrid& grid, int beats, double sampleRate)
+{
+    PreCount pc;
+    pc.sampleRate = sampleRate;
+    if (beats <= 0 || grid.isEmpty() || sampleRate <= 0.0)
+        return pc;
+
+    const size_t n = std::min<size_t> (4, grid.beats.size() - 1);
+    const double interval = (grid.beats[n] - grid.beats[0]) / (double) n;
+
+    pc.beats = beats;
+    pc.silenceSamples = std::max (1LL, (long long) std::llround (beats * interval * sampleRate));
+    return pc;
+}
+
+BeatGrid ops::applyPreCount (const BeatGrid& grid, const PreCount& pc)
+{
+    if (! pc.isActive() || grid.isEmpty())
+        return grid;
+
+    const double shift = pc.silenceSeconds();
+    const double spacing = shift / pc.beats;
+    const double b0 = grid.beats[0];
+
+    BeatGrid out = grid;
+    out.beats.clear();
+    out.beats.reserve (grid.beats.size() + (size_t) pc.beats);
+    for (int k = 0; k < pc.beats; ++k)
+        out.beats.push_back (b0 + k * spacing);
+    for (double t : grid.beats)
+        out.beats.push_back (t + shift);
+
+    out.downbeatOffset = positiveMod (grid.firstDownbeatIndex() + pc.beats, std::max (1, grid.beatsPerBar));
+    return out;
+}
+
 GridLayout BeatGrid::computeLayout() const
 {
     GridLayout layout;
@@ -610,6 +652,26 @@ static std::vector<double> trimSilentRegions (const std::vector<double>& beats, 
     return out.size() >= 2 ? out : beats;
 }
 
+std::vector<double> shiftHalfBeat (const std::vector<double>& beats)
+{
+    if (beats.size() < 2)
+        return beats;
+
+    std::vector<double> out;
+    out.reserve (beats.size() + 1);
+
+    const double first = beats[0] - 0.5 * (beats[1] - beats[0]);
+    if (first >= 0.0)
+        out.push_back (first);
+
+    for (size_t i = 0; i + 1 < beats.size(); ++i)
+        out.push_back (0.5 * (beats[i] + beats[i + 1]));
+
+    const size_t n = beats.size();
+    out.push_back (beats[n - 1] + 0.5 * (beats[n - 1] - beats[n - 2]));
+    return out;
+}
+
 std::vector<double> process (const AnalysisResult& a, const ProcessingOptions& o)
 {
     std::vector<double> beats = a.rawBeats;
@@ -637,6 +699,10 @@ std::vector<double> process (const AnalysisResult& a, const ProcessingOptions& o
 
     if (o.fixOutliers)
         beats = fixOutliers (beats, &a);
+
+    // before snapping, so the moved beats still land on real transients
+    if (o.halfBeatShift)
+        beats = shiftHalfBeat (beats);
 
     if (o.trimSilence)
         beats = trimSilentRegions (beats, a);

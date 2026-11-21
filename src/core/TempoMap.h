@@ -58,6 +58,7 @@ struct ProcessingOptions
     bool   constantTempo = false;
     bool   trimSilence = true;   ///< drop beats in leading/trailing silence
     double offsetMs = 0.0;       ///< global offset added to every beat
+    bool   halfBeatShift = false;///< move every beat half a beat (tracker locked onto the off-beats)
 };
 
 //==============================================================================
@@ -113,12 +114,40 @@ struct BeatGrid
 };
 
 //==============================================================================
+/** A count-in added in front of the song for export. The audio is delayed by
+    silenceSamples (an exact sample count at the song's rate), and `beats` evenly
+    spaced beats at the opening tempo fill that gap, ending one beat before the
+    first detected beat. */
+struct PreCount
+{
+    int beats = 0;
+    long long silenceSamples = 0;
+    double sampleRate = 44100.0;
+
+    bool   isActive() const noexcept        { return beats > 0 && silenceSamples > 0; }
+    double silenceSeconds() const noexcept  { return sampleRate > 0.0 ? (double) silenceSamples / sampleRate : 0.0; }
+    /** The same silence in samples at another rate (exact when the rates match). */
+    long long silenceSamplesAt (double rate) const noexcept;
+};
+
+//==============================================================================
 namespace ops
 {
+    /** Pre-count of `beats` beats at the tempo of the grid's first beats (mean of up to 4 intervals). */
+    PreCount computePreCount (const BeatGrid& grid, int beats, double sampleRate);
+
+    /** The grid as it is exported with a pre-count: every beat delayed by the
+        silence, count-in beats inserted in front, bar starts kept on the same beats. */
+    BeatGrid applyPreCount (const BeatGrid& grid, const PreCount& preCount);
+
     /** Full post-processing pipeline from raw tracker output to final beats. */
     std::vector<double> process (const AnalysisResult& analysis, const ProcessingOptions& options);
 
     std::vector<double> doubleTempo (const std::vector<double>& beats);
+
+    /** Every beat moved to the midpoint of its interval (the off-beats become the beats),
+        plus one extrapolated beat in front if it is still >= 0. */
+    std::vector<double> shiftHalfBeat (const std::vector<double>& beats);
     std::vector<double> halveTempo  (const std::vector<double>& beats, const AnalysisResult* analysis);
 
     std::vector<double> fixOutliers (const std::vector<double>& beats, const AnalysisResult* analysis);

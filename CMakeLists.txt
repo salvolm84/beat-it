@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Target architecture")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
-project(BeatIt VERSION 1.0.1 LANGUAGES C CXX)
+project(BeatIt VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,7 +65,8 @@ target_compile_options(btrack PRIVATE -w)
 set(BEATIT_CORE_SOURCES
     src/core/BeatAnalyzer.cpp
     src/core/TempoMap.cpp
-    src/core/MidiExporter.cpp)
+    src/core/MidiExporter.cpp
+    src/core/AudioPadder.cpp)
 
 set(BEATIT_COMMON_DEFS
     JUCE_WEB_BROWSER=0
