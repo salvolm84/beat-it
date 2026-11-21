@@ -29,6 +29,10 @@ The app is at `build/BeatIt_artefacts/Release/Beat It.app`.
 
 ## Workflow
 
+The side panel's sections (Analysis, Grid & Bars, Playback, Export) collapse when you click their headers. Hover the
+waveform to see the time and bar.beat under the cursor. **View ▸ Theme** switches between *Studio* (dark blue, the
+default) and *Classic*.
+
 1. **Open** a WAV / MP3 / AIFF / FLAC / M4A file (or drop it on the window). Analysis runs
    automatically and takes about 1 s per 2 minutes of audio.
 2. **Check**: play with the metronome on. Orange lines are bar starts and the curve below is
@@ -39,12 +43,12 @@ The app is at `build/BeatIt_artefacts/Release/Beat It.app`.
    * Grid on the off-beats (beat lines between the kick and bass hits, common in reggae, ska and swing): click
      **½ beat** to move every beat by half a beat. The moved beats are snapped to transients again. Then check the bar start.
    * Individual beats: drag them (hold Cmd for fine moves), double-click to add, Option-click to delete.
-     During playback, press **B** to add a beat at the playhead. Undo/redo with Cmd+Z / Cmd+Shift+Z.
+     During playback, press **B** to add a beat at the playhead. Undo/redo with Cmd+Z / Cmd+Shift+Z or the arrows in the top bar.
    * Song played to a click? Tick **Constant tempo**.
-4. **Export MIDI tempo map…**
-   * **Export metronome audio…** (Cmd+Option+E) also writes the click alone as a mono 24-bit WAV.
+4. **Export ▾ ▸ MIDI tempo map…** (Cmd+E). The Export menu in the top bar also holds the other exports.
+   * **Metronome audio (WAV)…** (Cmd+Option+E) writes the click alone as a mono 24-bit WAV.
      It has the same sample rate and length as the song, so it lines up when placed at 0:00. It is
-     normalised to a 0 dBFS peak. Bar starts are accented if *Accent bar starts* is ticked.
+     normalised to a 0 dBFS peak. Bar starts are accented if *Accent* is on in the Playback panel.
 5. **Optional pre-count (count-in).** Set **Pre-count** in the Export panel to 1–16 beats. All exports
    (MIDI, CSV, metronome WAV) then start with that many extra beats at the song's opening tempo. The panel
    shows the exact silence this adds (seconds and samples).

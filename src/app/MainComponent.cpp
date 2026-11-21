@@ -12,7 +12,8 @@ namespace
         menuUndo = 100, menuRedo, menuDeleteBeat, menuAddBeatAtPlayhead, menuDoubleTempo, menuHalveTempo, menuAutoDownbeat,
         menuPlay = 200, menuToStart, menuMetronome, menuLoop, menuFollow,
         menuZoomIn = 300, menuZoomOut, menuZoomFit,
-        menuShortcuts = 400, menuAbout
+        menuShortcuts = 400, menuAbout,
+        menuThemeStudio = 500, menuThemeClassic, menuAutoAnalyze
     };
 
     const juce::String appVersion { JUCE_APPLICATION_VERSION_STRING };
@@ -34,11 +35,23 @@ namespace
         s.setWantsKeyboardFocus (false);
     }
 
+    void styleKnob (juce::Slider& s, double lo, double hi, double step, const juce::String& suffix, int colour)
+    {
+        s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 18);
+        s.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
+        s.setRange (lo, hi, step);
+        s.setTextValueSuffix (suffix);
+        s.setMouseDragSensitivity (180);
+        s.setWantsKeyboardFocus (false);
+        s.getProperties().set ("knob", colour);
+    }
+
     void styleLabel (juce::Label& l, const juce::String& text, bool dim = true)
     {
         l.setText (text, juce::dontSendNotification);
         l.setFont (juce::Font (juce::FontOptions (13.0f)));
-        l.setColour (juce::Label::textColourId, dim ? theme::textDim : theme::text);
+        l.getProperties().set ("role", dim ? "dim" : "text");   // colour comes from the active theme
         l.setMinimumHorizontalScale (0.8f);
     }
 
@@ -48,19 +61,30 @@ namespace
 //==============================================================================
 void IconButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
 {
-    auto r = getLocalBounds().toFloat().reduced (1.0f);
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
     const bool on = getToggleState();
+    const float alpha = isEnabled() ? 1.0f : 0.45f;
 
-    g.setColour (on ? theme::accent.withAlpha (0.22f) : theme::panelRaised);
-    if (highlighted) g.setColour (on ? theme::accent.withAlpha (0.32f) : theme::panelRaised.brighter (0.08f));
-    if (down)        g.setColour (theme::panelRaised.brighter (0.18f));
-    g.fillRoundedRectangle (r, 6.0f);
-    g.setColour (on ? theme::accent : theme::outline);
-    g.drawRoundedRectangle (r, 6.0f, 1.0f);
+    auto base = theme::panelRaised;
+    if (down)             base = base.darker (0.2f);
+    else if (highlighted) base = base.brighter (0.12f);
+    g.setGradientFill (juce::ColourGradient (base.brighter (0.06f).withMultipliedAlpha (alpha), 0.0f, r.getY(),
+                                             base.darker (0.10f).withMultipliedAlpha (alpha), 0.0f, r.getBottom(), false));
+    g.fillRoundedRectangle (r, 5.0f);
+    if (on)
+    {
+        g.setColour (theme::accent.withAlpha (0.16f));
+        g.fillRoundedRectangle (r, 5.0f);
+    }
+    g.setColour (juce::Colours::white.withAlpha (0.05f * alpha));
+    g.drawLine (r.getX() + 5.0f, r.getY() + 1.0f, r.getRight() - 5.0f, r.getY() + 1.0f, 1.0f);
+    g.setColour ((on ? theme::accent.withAlpha (0.8f) : theme::outline).withMultipliedAlpha (alpha));
+    g.drawRoundedRectangle (r, 5.0f, 1.0f);
 
-    auto c = r.withSizeKeepingCentre (std::min (r.getWidth(), r.getHeight()) * 0.46f,
-                                      std::min (r.getWidth(), r.getHeight()) * 0.46f);
-    g.setColour (isEnabled() ? (on ? theme::accent : theme::text) : theme::textDim);
+    auto c = r.withSizeKeepingCentre (std::min (r.getWidth(), r.getHeight()) * 0.42f,
+                                      std::min (r.getWidth(), r.getHeight()) * 0.42f);
+    const bool playing = icon == Icon::pause;
+    g.setColour ((on || playing ? theme::accent : theme::text).withMultipliedAlpha (alpha));
 
     juce::Path p;
     switch (icon)
@@ -114,6 +138,73 @@ void IconButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
             p.addArrow ({ c.getCentreX() + 1.0f, c.getCentreY(), c.getRight(), c.getCentreY() }, 2.0f, 7.0f, 5.0f);
             g.fillPath (p);
             break;
+        case Icon::undo:
+        case Icon::redo:
+        {
+            // curved arrow: an arc with an arrowhead at its start
+            const bool fwd = icon == Icon::redo;
+            const float rad = c.getWidth() * 0.5f;
+            const auto ctr = c.getCentre().translated (0.0f, rad * 0.25f);
+            juce::Path arc;
+            arc.addCentredArc (ctr.x, ctr.y, rad, rad * 0.85f, 0.0f,
+                               fwd ? -juce::MathConstants<float>::pi * 0.15f : juce::MathConstants<float>::pi * 0.15f,
+                               fwd ? -juce::MathConstants<float>::pi * 1.25f : juce::MathConstants<float>::pi * 1.25f, true);
+            g.strokePath (arc, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            const auto tip = arc.getPointAlongPath (0.0f);
+            const float dir = fwd ? 1.0f : -1.0f;
+            p.addTriangle (tip.x + dir * 4.5f, tip.y, tip.x - dir * 1.5f, tip.y - 4.5f, tip.x - dir * 1.5f, tip.y + 4.5f);
+            g.fillPath (p);
+            break;
+        }
+    }
+}
+
+//==============================================================================
+void ReadoutDisplay::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    g.setGradientFill (juce::ColourGradient (theme::displayBottom, 0.0f, r.getY(), theme::displayTop, 0.0f, r.getBottom(), false));
+    g.fillRoundedRectangle (r, 6.0f);
+    g.setColour (theme::outline);
+    g.drawRoundedRectangle (r, 6.0f, 1.0f);
+
+    struct Cell { const char* caption; const juce::String& value; juce::Colour colour; float weight; bool mono; };
+    const Cell cells[] = { { "TIME",  timeText, theme::text,      1.45f, true },
+                           { "BAR",   barText,  theme::accent,    0.8f,  false },
+                           { "BEAT",  beatText, theme::accent,    0.7f,  false },
+                           { "TEMPO", bpmText,  theme::accentAlt, 1.2f,  false } };
+    float total = 0.0f;
+    for (auto& c : cells) total += c.weight;
+
+    auto area = r.reduced (4.0f, 0.0f);
+    const float unit = area.getWidth() / total;
+    for (size_t i = 0; i < std::size (cells); ++i)
+    {
+        auto cell = area.removeFromLeft (unit * cells[i].weight);
+        if (i > 0)
+        {
+            g.setColour (theme::outline.withAlpha (0.7f));
+            g.fillRect (juce::Rectangle<float> (cell.getX(), cell.getY() + 8.0f, 1.0f, cell.getHeight() - 16.0f));
+        }
+        auto inner = cell.reduced (10.0f, 4.0f);
+        g.setColour (theme::textDim);
+        g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)).withExtraKerningFactor (0.14f));
+        g.drawText (cells[i].caption, inner.removeFromTop (13.0f), juce::Justification::left, false);
+
+        g.setColour (cells[i].colour);
+        g.setFont (cells[i].mono ? juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 19.0f, juce::Font::plain))
+                                 : juce::Font (juce::FontOptions (19.0f, juce::Font::bold)));
+        g.drawText (cells[i].value, inner, juce::Justification::centredLeft, true);
+
+        if (i == 0 && inCountIn)
+        {
+            auto pill = juce::Rectangle<float> (64.0f, 14.0f).withPosition (cell.getRight() - 72.0f, cell.getY() + 5.0f);
+            g.setColour (theme::preCount.withAlpha (0.2f));
+            g.fillRoundedRectangle (pill, 7.0f);
+            g.setColour (theme::preCount);
+            g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::bold)).withExtraKerningFactor (0.12f));
+            g.drawText ("COUNT-IN", pill, juce::Justification::centred, false);
+        }
     }
 }
 
@@ -133,23 +224,30 @@ MainComponent::MainComponent()
     deviceManager.addAudioCallback (&sourcePlayer);
 
     // ---- top bar
-    for (auto* b : { &openButton, &analyzeButton, &exportButton, &audioSettingsButton })
+    for (auto* b : std::initializer_list<juce::Button*> { &openButton, &analyzeButton, &exportButton, &audioSettingsButton,
+                                                          &undoButton, &redoButton })
     {
         addAndMakeVisible (b);
         b->setWantsKeyboardFocus (false);
     }
-    exportButton.setColour (juce::TextButton::buttonColourId, theme::accent);
-    exportButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
+    exportButton.getProperties().set ("primary", true);
     openButton.onClick = [this] { showOpenDialog(); };
     analyzeButton.onClick = [this] { startAnalysis(); };
-    exportButton.onClick = [this] { exportMidi(); };
+    exportButton.onClick = [this] { showExportMenu(); };
     audioSettingsButton.onClick = [this] { showAudioSettings(); };
+    undoButton.onClick = [this] { undo(); };
+    redoButton.onClick = [this] { redo(); };
     openButton.setTooltip ("Open a WAV / MP3 / AIFF / FLAC / M4A file (Cmd+O). You can also drop a file on the window.");
     analyzeButton.setTooltip ("Re-run beat tracking from scratch (Cmd+R)");
-    exportButton.setTooltip ("Write a MIDI file containing the tempo map (Cmd+E)");
+    exportButton.setTooltip ("MIDI tempo map, metronome audio, CSV and padded audio files");
+    audioSettingsButton.setTooltip ("Audio output device and buffer size");
 
     addAndMakeVisible (fileLabel);
+    addAndMakeVisible (fileInfoLabel);
     styleLabel (fileLabel, "No file loaded");
+    styleLabel (fileInfoLabel, "Open a song or drop it on the window");
+    fileLabel.setFont (juce::Font (juce::FontOptions (13.5f, juce::Font::bold)));
+    fileInfoLabel.setFont (juce::Font (juce::FontOptions (12.0f)));
 
     // ---- views
     addAndMakeVisible (waveform);
@@ -157,7 +255,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (scrollBar);
     scrollBar.setAutoHide (false);
     scrollBar.addListener (this);
-    waveform.setEmptyMessage ("Drop a WAV or MP3 file here\nor click Open...");
+    waveform.setEmptyMessage ("Drop a song here\nWAV, MP3, AIFF, FLAC or M4A  -  or click Open... (Cmd+O)");
 
     waveform.onSeek = [this] (double t) { engine.setPosition (t); };
     waveform.onRangeRequested = [this] (double s, double e) { setViewRange (s, e); };
@@ -194,16 +292,7 @@ MainComponent::MainComponent()
     zoomOutButton.onClick = [this] { zoom (2.0); };
     zoomFitButton.onClick = [this] { zoomToFit(); };
 
-    for (auto* l : { &timeLabel, &barBeatLabel, &bpmLabel })
-    {
-        addAndMakeVisible (l);
-        l->setJustificationType (juce::Justification::centredLeft);
-    }
-    timeLabel.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 22.0f, juce::Font::plain)));
-    barBeatLabel.setFont (juce::Font (juce::FontOptions (16.0f)));
-    bpmLabel.setFont (juce::Font (juce::FontOptions (16.0f, juce::Font::bold)));
-    bpmLabel.setColour (juce::Label::textColourId, theme::accentAlt);
-    barBeatLabel.setColour (juce::Label::textColourId, theme::accent);
+    addAndMakeVisible (readout);
 
     // ---- side panel
     sideViewport.setViewedComponent (&side, false);
@@ -212,6 +301,13 @@ MainComponent::MainComponent()
     addAndMakeVisible (sideViewport);
     side.painter = [this] (juce::Graphics& g) { paintSidePanel (g); };
     side.layout  = [this] { layoutSidePanel(); };
+    side.headerAt = [this] (juce::Point<int> p)
+    {
+        for (int i = 0; i < (int) sections.size(); ++i)
+            if (sections[(size_t) i].header.contains (p)) return i;
+        return -1;
+    };
+    side.onHeaderClicked = [this] (int i) { toggleSection (i); };
 
     auto addSide = [this] (juce::Component& c) { side.addAndMakeVisible (c); c.setWantsKeyboardFocus (false); };
 
@@ -238,7 +334,7 @@ MainComponent::MainComponent()
 
     for (auto* c : std::initializer_list<juce::Component*> { &rangeLabel, &rangeSlider, &smoothingLabel, &smoothingSlider,
                                                               &offsetLabel, &offsetSlider, &snapToggle, &fixToggle,
-                                                              &silenceToggle, &constantToggle, &autoAnalyzeToggle })
+                                                              &silenceToggle, &constantToggle })
         addSide (*c);
 
     rangeSlider.onDragStart = smoothingSlider.onDragStart = offsetSlider.onDragStart = [this] { pushUndo(); };
@@ -254,10 +350,7 @@ MainComponent::MainComponent()
     styleLabel (tempoOctaveLabel, "Tempo");
     styleLabel (gridInfoLabel, "", false);
     gridInfoLabel.setJustificationType (juce::Justification::topLeft);
-    styleLabel (editHintLabel, "Drag beat lines to move (Cmd = fine), double-click to add, Option-click to delete, "
-                               "right-click for more. Help menu lists all shortcuts.");
-    editHintLabel.setFont (juce::Font (juce::FontOptions (11.5f)));
-    editHintLabel.setJustificationType (juce::Justification::topLeft);
+
 
     for (int i = 1; i <= 16; ++i) numeratorBox.addItem (juce::String (i), i);
     for (int d : { 2, 4, 8, 16 }) denominatorBox.addItem (juce::String (d), d);
@@ -271,38 +364,43 @@ MainComponent::MainComponent()
     downbeatAutoButton.setTooltip ("Guess bar starts from bass / harmonic changes");
     doubleButton.setTooltip ("Double the tempo (insert a beat between every pair)");
     halveButton.setTooltip ("Halve the tempo (keep every other beat)");
-    undoButton.setTooltip ("Undo (Cmd+Z)");
-    redoButton.setTooltip ("Redo (Cmd+Shift+Z)");
+
     downbeatPrevButton.onClick = [this] { shiftDownbeat (-1); };
     downbeatNextButton.onClick = [this] { shiftDownbeat (1); };
     downbeatAutoButton.onClick = [this] { autoDownbeat(); };
     halfBeatButton.setClickingTogglesState (true);
-    halfBeatButton.setColour (juce::TextButton::buttonOnColourId, theme::accent);
-    halfBeatButton.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
     halfBeatButton.setTooltip ("Move every beat by half a beat. Use it when the grid sits on the off-beats "
                                "(hi-hat / guitar skank) instead of the kick and bass, common in reggae, ska and swing.");
     halfBeatButton.onClick = [this] { reprocess (true, true); };
     doubleButton.onClick = [this] { changeTempoOctave (true); };
     halveButton.onClick = [this] { changeTempoOctave (false); };
-    undoButton.onClick = [this] { undo(); };
-    redoButton.onClick = [this] { redo(); };
 
     for (auto* c : std::initializer_list<juce::Component*> { &timeSigLabel, &numeratorBox, &denominatorBox, &downbeatLabel,
                                                               &downbeatPrevButton, &downbeatNextButton, &downbeatAutoButton,
-                                                              &halfBeatButton, &tempoOctaveLabel, &doubleButton, &halveButton, &undoButton,
-                                                              &redoButton, &gridInfoLabel, &editHintLabel })
+                                                              &halfBeatButton, &tempoOctaveLabel, &doubleButton, &halveButton, &gridInfoLabel })
         addSide (*c);
 
     // playback
-    styleLabel (musicLabel, "Music");
-    styleSlider (musicSlider, 0, 100, 1, " %");
-    styleLabel (clickLabel, "Click");
-    styleSlider (clickSlider, 0, 100, 1, " %");
-    styleLabel (speedLabel, "Speed");
-    styleSlider (speedSlider, 50, 150, 5, " %");
+    styleLabel (musicLabel, "MUSIC");
+    styleKnob (musicSlider, 0, 100, 1, " %", 0);
+    styleLabel (clickLabel, "CLICK");
+    styleKnob (clickSlider, 0, 100, 1, " %", 1);
+    styleLabel (speedLabel, "SPEED");
+    styleKnob (speedSlider, 50, 150, 5, " %", 2);
+    for (auto* l : { &musicLabel, &clickLabel, &speedLabel })
+    {
+        l->setJustificationType (juce::Justification::centred);
+        l->setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)).withExtraKerningFactor (0.12f));
+    }
+    musicSlider.setDoubleClickReturnValue (true, 85.0);
+    clickSlider.setDoubleClickReturnValue (true, 70.0);
+    musicSlider.setTooltip ("Music volume. Double-click to reset.");
+    clickSlider.setTooltip ("Metronome volume. Double-click to reset.");
+    muteToggle.setTooltip ("Mute the music, to hear only the metronome");
+    accentToggle.setTooltip ("Higher, louder click on bar starts");
     speedSlider.setDoubleClickReturnValue (true, 100.0);
     speedSlider.setValue (100.0, juce::dontSendNotification);
-    speedSlider.setTooltip ("Playback speed (changes pitch). Slow down to check beat placement.");
+    speedSlider.setTooltip ("Playback speed (changes pitch). Slow down to check beat placement. Double-click to reset.");
     metronomeToggle.setTooltip ("Metronome click on every beat (M)");
 
     musicSlider.onValueChange = [this] { engine.setMusicGain ((float) std::pow (musicSlider.getValue() / 100.0, 2.0)); };
@@ -322,8 +420,8 @@ MainComponent::MainComponent()
     ppqBox.setSelectedId (960, juce::dontSendNotification);
     clickTrackToggle.setTooltip ("Adds a MIDI track with a wood-block note on each beat, handy for checking in the DAW");
     markersToggle.setTooltip ("Adds a marker meta-event at every bar");
-    exportMidiButton.setColour (juce::TextButton::buttonColourId, theme::accent);
-    exportMidiButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
+    exportMidiButton.getProperties().set ("primary", true);
+    exportMidiButton.setTooltip ("Write a MIDI file with the tempo map (Cmd+E)");
     exportMidiButton.onClick = [this] { exportMidi(); };
     exportCsvButton.onClick = [this] { exportCsv(); };
     exportCsvButton.setTooltip ("Export beats as CSV: time, bar, beat, BPM (Cmd+Shift+E)");
@@ -351,6 +449,7 @@ MainComponent::MainComponent()
     // ---- status bar
     addAndMakeVisible (statusLabel);
     styleLabel (statusLabel, "Ready");
+    statusLabel.setFont (juce::Font (juce::FontOptions (12.5f)));
     addChildComponent (progressBar);
     addChildComponent (cancelButton);
     cancelButton.onClick = [this] { cancelRequested = true; };
@@ -392,6 +491,9 @@ void MainComponent::loadSettings()
     accentToggle.setToggleState (s.getBoolValue ("accent", true), juce::sendNotification);
     followButton.setToggleState (s.getBoolValue ("follow", true), juce::dontSendNotification);
     autoAnalyzeToggle.setToggleState (s.getBoolValue ("autoAnalyze", true), juce::dontSendNotification);
+    for (auto& t : juce::StringArray::fromTokens (s.getValue ("collapsed", {}), "|", {}))
+        if (t.isNotEmpty()) collapsedSections.insert (t);
+    applyTheme (s.getIntValue ("theme", 0) == 1 ? theme::Id::classic : theme::Id::studio, false);
 
     procOptions.minBpm = s.getDoubleValue ("minBpm", procOptions.minBpm);
     procOptions.maxBpm = s.getDoubleValue ("maxBpm", procOptions.maxBpm);
@@ -432,6 +534,12 @@ void MainComponent::saveSettings()
     s.setValue ("accent", accentToggle.getToggleState());
     s.setValue ("follow", followButton.getToggleState());
     s.setValue ("autoAnalyze", autoAnalyzeToggle.getToggleState());
+    s.setValue ("theme", theme::activeId() == theme::Id::classic ? 1 : 0);
+    {
+        juce::StringArray c;
+        for (auto& t : collapsedSections) c.add (t);
+        s.setValue ("collapsed", c.joinIntoString ("|"));
+    }
     s.setValue ("minBpm", rangeSlider.getMinValue());
     s.setValue ("maxBpm", rangeSlider.getMaxValue());
     s.setValue ("smoothing", (int) smoothingSlider.getValue());
@@ -450,43 +558,93 @@ void MainComponent::saveSettings()
 }
 
 //==============================================================================
+namespace
+{
+    constexpr int topBarHeight = 56, statusBarHeight = 28, sidePanelWidth = 320;
+}
+
 void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (theme::background);
 
     // top bar
-    g.setColour (theme::panel);
-    g.fillRect (getLocalBounds().removeFromTop (52));
-    g.setColour (theme::outline);
-    g.fillRect (0, 52, getWidth(), 1);
+    auto top = getLocalBounds().removeFromTop (topBarHeight).toFloat();
+    g.setGradientFill (juce::ColourGradient (theme::panel.brighter (0.06f), 0.0f, 0.0f,
+                                             theme::panel.darker (0.1f), 0.0f, top.getBottom(), false));
+    g.fillRect (top);
+    g.setColour (juce::Colours::black.withAlpha (0.5f));
+    g.fillRect (0.0f, top.getBottom() - 1.0f, top.getWidth(), 1.0f);
 
-    // app title
-    g.setColour (theme::accent);
-    g.setFont (juce::Font (juce::FontOptions (19.0f, juce::Font::bold)));
-    g.drawText ("Beat It", 16, 6, 80, 28, juce::Justification::centredLeft);
-    g.setColour (theme::textDim);
-    g.setFont (juce::Font (juce::FontOptions (11.0f)));
-    g.drawText ("v" + appVersion, 16, 31, 80, 14, juce::Justification::centredLeft);
+    // logo: a tiny waveform of beat bars, name and version
+    {
+        const float heights[] = { 0.45f, 0.9f, 0.6f, 1.0f, 0.5f };
+        const float x0 = 16.0f, base = top.getCentreY() + 11.0f;
+        for (int i = 0; i < 5; ++i)
+        {
+            const float h = 22.0f * heights[i];
+            const auto bar = juce::Rectangle<float> (x0 + (float) i * 5.0f, base - h, 3.0f, h);
+            theme::glowLine (g, bar, i == 3 ? theme::accent : theme::waveform.brighter (0.3f), 3.0f);
+        }
+        g.setColour (theme::text);
+        g.setFont (juce::Font (juce::FontOptions (17.0f, juce::Font::bold)));
+        g.drawText ("Beat It", juce::Rectangle<float> (48.0f, top.getCentreY() - 15.0f, 80.0f, 20.0f), juce::Justification::left, false);
+        g.setColour (theme::textDim);
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        g.drawText ("v" + appVersion, juce::Rectangle<float> (48.0f, top.getCentreY() + 4.0f, 80.0f, 14.0f), juce::Justification::left, false);
+    }
+
+    // file chip around the file name / info labels
+    {
+        auto chip = fileLabel.getBounds().getUnion (fileInfoLabel.getBounds()).toFloat().expanded (10.0f, 3.0f);
+        g.setColour (theme::displayBottom.withAlpha (0.8f));
+        g.fillRoundedRectangle (chip, 6.0f);
+        g.setColour (theme::outline);
+        g.drawRoundedRectangle (chip.reduced (0.5f), 6.0f, 1.0f);
+    }
 
     // status bar
-    g.setColour (theme::panel);
-    g.fillRect (getLocalBounds().removeFromBottom (28));
-    g.setColour (theme::outline);
-    g.fillRect (0, getHeight() - 28, getWidth(), 1);
+    auto status = getLocalBounds().removeFromBottom (statusBarHeight).toFloat();
+    g.setColour (theme::panel.darker (0.15f));
+    g.fillRect (status);
+    g.setColour (juce::Colours::black.withAlpha (0.5f));
+    g.fillRect (0.0f, status.getY(), status.getWidth(), 1.0f);
+    {
+        const auto dot = juce::Rectangle<float> (7.0f, 7.0f).withCentre ({ 18.0f, status.getCentreY() });
+        const auto c = statusIsError ? theme::danger : busy ? theme::accent : theme::loopEdge;
+        if (theme::glow() > 0.0f)
+        {
+            g.setColour (c.withAlpha (0.25f));
+            g.fillEllipse (dot.expanded (3.0f));
+        }
+        g.setColour (c);
+        g.fillEllipse (dot);
+    }
+
+    // main area frame (waveform + tempo display)
+    {
+        auto frame = waveform.getBounds().getUnion (tempoView.getBounds()).toFloat().expanded (1.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.45f));
+        g.drawRoundedRectangle (frame.expanded (1.0f), 4.0f, 2.0f);
+        g.setColour (theme::outline);
+        g.drawRoundedRectangle (frame, 3.0f, 1.0f);
+    }
 
     // side panel background
     g.setColour (theme::panel);
-    g.fillRect (sideViewport.getBounds().expanded (0, 0));
+    g.fillRect (sideViewport.getBounds());
 }
 
 void MainComponent::paintOverChildren (juce::Graphics& g)
 {
     if (dragHighlight)
     {
-        g.setColour (theme::accent.withAlpha (0.15f));
-        g.fillRect (getLocalBounds());
+        auto r = getLocalBounds().toFloat().reduced (4.0f);
+        g.setColour (theme::accent.withAlpha (0.10f));
+        g.fillRoundedRectangle (r, 10.0f);
         g.setColour (theme::accent);
-        g.drawRect (getLocalBounds(), 3);
+        g.drawRoundedRectangle (r, 10.0f, 2.0f);
+        g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
+        g.drawText ("Drop to open", r, juce::Justification::centred, false);
     }
 }
 
@@ -494,24 +652,33 @@ void MainComponent::resized()
 {
     auto area = getLocalBounds();
 
-    // top bar
+    // top bar: logo | open, analyze | undo, redo | file | export, audio
     {
-        auto top = area.removeFromTop (52).reduced (12, 10);
-        top.removeFromLeft (84); // title
-        openButton.setBounds (top.removeFromLeft (90));
-        top.removeFromLeft (8);
-        analyzeButton.setBounds (top.removeFromLeft (90));
-        top.removeFromLeft (8);
-        exportButton.setBounds (top.removeFromLeft (120));
-        audioSettingsButton.setBounds (top.removeFromRight (90));
-        top.removeFromLeft (16);
-        top.removeFromRight (12);
-        fileLabel.setBounds (top);
+        auto top = area.removeFromTop (topBarHeight).reduced (12, 12);
+        top.removeFromLeft (124);   // logo
+        openButton.setBounds (top.removeFromLeft (84));
+        top.removeFromLeft (6);
+        analyzeButton.setBounds (top.removeFromLeft (84));
+        top.removeFromLeft (14);
+        undoButton.setBounds (top.removeFromLeft (34));
+        top.removeFromLeft (4);
+        redoButton.setBounds (top.removeFromLeft (34));
+
+        audioSettingsButton.setBounds (top.removeFromRight (84));
+        top.removeFromRight (8);
+        exportButton.setBounds (top.removeFromRight (112));
+        top.removeFromRight (20);
+        top.removeFromLeft (26);
+
+        auto file = top.reduced (0, 1);
+        fileLabel.setBounds (file.removeFromTop (file.getHeight() / 2 + 1));
+        fileInfoLabel.setBounds (file);
     }
 
     // status bar
     {
-        auto status = area.removeFromBottom (28).reduced (12, 4);
+        auto status = area.removeFromBottom (statusBarHeight).reduced (12, 4);
+        status.removeFromLeft (16);   // status dot
         cancelButton.setBounds (status.removeFromRight (70));
         status.removeFromRight (8);
         progressBar.setBounds (status.removeFromRight (220));
@@ -519,56 +686,84 @@ void MainComponent::resized()
     }
 
     // side panel
-    sideViewport.setBounds (area.removeFromRight (316));
-    side.setSize (sideViewport.getWidth() - sideViewport.getScrollBarThickness(), 900);
+    sideViewport.setBounds (area.removeFromRight (sidePanelWidth));
+    side.setSize (sideViewport.getWidth() - sideViewport.getScrollBarThickness(), std::max (side.getHeight(), 100));
+    layoutSidePanel();
 
     auto main = area.reduced (12, 10);
 
-    // transport row
+    // transport row: buttons | readout | zoom
     {
-        auto t = main.removeFromBottom (48).withTrimmedTop (6);
+        auto t = main.removeFromBottom (54).withTrimmedTop (8);
         const int b = t.getHeight();
-        toStartButton.setBounds (t.removeFromLeft (b + 6)); t.removeFromLeft (6);
-        playButton.setBounds (t.removeFromLeft (b + 18));  t.removeFromLeft (6);
-        stopButton.setBounds (t.removeFromLeft (b + 6));   t.removeFromLeft (14);
-        loopButton.setBounds (t.removeFromLeft (b + 6));   t.removeFromLeft (6);
-        followButton.setBounds (t.removeFromLeft (b + 6)); t.removeFromLeft (18);
+        toStartButton.setBounds (t.removeFromLeft (b));     t.removeFromLeft (5);
+        playButton.setBounds (t.removeFromLeft (b + 16));   t.removeFromLeft (5);
+        stopButton.setBounds (t.removeFromLeft (b));        t.removeFromLeft (12);
+        loopButton.setBounds (t.removeFromLeft (b));        t.removeFromLeft (5);
+        followButton.setBounds (t.removeFromLeft (b));      t.removeFromLeft (14);
 
-        zoomFitButton.setBounds (t.removeFromRight (b + 4)); t.removeFromRight (6);
-        zoomInButton.setBounds (t.removeFromRight (b + 4));  t.removeFromRight (6);
-        zoomOutButton.setBounds (t.removeFromRight (b + 4)); t.removeFromRight (18);
+        zoomFitButton.setBounds (t.removeFromRight (b));    t.removeFromRight (5);
+        zoomInButton.setBounds (t.removeFromRight (b));     t.removeFromRight (5);
+        zoomOutButton.setBounds (t.removeFromRight (b));    t.removeFromRight (14);
 
-        timeLabel.setBounds (t.removeFromLeft (130));
-        barBeatLabel.setBounds (t.removeFromLeft (170));
-        bpmLabel.setBounds (t);
+        readout.setBounds (t.removeFromLeft (std::min (t.getWidth(), 460)));
     }
 
-    scrollBar.setBounds (main.removeFromBottom (12));
-    main.removeFromBottom (4);
-    tempoView.setBounds (main.removeFromBottom (juce::jlimit (100, 190, main.getHeight() / 4)));
+    scrollBar.setBounds (main.removeFromBottom (10));
     main.removeFromBottom (6);
+    tempoView.setBounds (main.removeFromBottom (juce::jlimit (100, 190, main.getHeight() / 4)));
+    main.removeFromBottom (1);
     waveform.setBounds (main);
+}
+
+void MainComponent::toggleSection (int index)
+{
+    if (index < 0 || index >= (int) sections.size())
+        return;
+
+    const auto& title = sections[(size_t) index].title;
+    if (collapsedSections.count (title) > 0) collapsedSections.erase (title);
+    else                                     collapsedSections.insert (title);
+
+    layoutSidePanel();
+    side.repaint();
+    saveSettings();
 }
 
 void MainComponent::layoutSidePanel()
 {
     sections.clear();
-    auto area = side.getLocalBounds().reduced (14, 10);
-    const int rowH = 26, gap = 5, labelW = 88;
+    // lay out against unlimited height, then size the panel to fit its content
+    juce::Rectangle<int> area (16, 10, side.getWidth() - 32, 100000);
+    const int rowH = 26, gap = 6, labelW = 92, headerH = 30;
+    bool collapsed = false;
 
     auto beginSection = [&] (const juce::String& title)
     {
         area.removeFromTop (6);
-        sections.push_back ({ title, area.withHeight (0) });
-        area.removeFromTop (22);
+        collapsed = collapsedSections.count (title) > 0;
+        Section sec;
+        sec.title = title;
+        sec.collapsed = collapsed;
+        sec.header = area.removeFromTop (headerH).expanded (8, 0);
+        sec.body = area.withHeight (0);
+        sections.push_back (sec);
     };
     auto endSection = [&]
     {
-        auto& r = sections.back().second;
-        r = r.withBottom (area.getY() + 2);
-        area.removeFromTop (8);
+        auto& sec = sections.back();
+        sec.body = sec.body.withBottom (collapsed ? sec.header.getBottom() : area.getY() + 4);
+        if (! collapsed) area.removeFromTop (8);
+        collapsed = false;
     };
-    auto row = [&] (int h = rowH) { auto r = area.removeFromTop (h); area.removeFromTop (h < rowH ? 2 : gap); return r; };
+    // rows of a collapsed section get empty bounds, which hides their components
+    auto row = [&] (int h = rowH)
+    {
+        if (collapsed) return juce::Rectangle<int>();
+        auto r = area.removeFromTop (h);
+        area.removeFromTop (h < rowH ? 2 : gap);
+        return r;
+    };
     auto labelled = [&] (juce::Label& l) { auto r = row(); l.setBounds (r.removeFromLeft (labelW)); return r; };
 
     // ANALYSIS
@@ -580,72 +775,73 @@ void MainComponent::layoutSidePanel()
     fixToggle.setBounds (row (22));
     silenceToggle.setBounds (row (22));
     constantToggle.setBounds (row (22));
-    autoAnalyzeToggle.setBounds (row (22));
     endSection();
 
     // GRID
     beginSection ("GRID & BARS");
     {
         auto r = labelled (timeSigLabel);
-        numeratorBox.setBounds (r.removeFromLeft (64));
+        numeratorBox.setBounds (r.removeFromLeft (62));
         r.removeFromLeft (6);
-        denominatorBox.setBounds (r.removeFromLeft (64));
+        denominatorBox.setBounds (r.removeFromLeft (62));
     }
     {
         auto r = labelled (downbeatLabel);
-        downbeatPrevButton.setBounds (r.removeFromLeft (36)); r.removeFromLeft (4);
-        downbeatNextButton.setBounds (r.removeFromLeft (36)); r.removeFromLeft (8);
-        downbeatAutoButton.setBounds (r.removeFromLeft (64)); r.removeFromLeft (8);
+        downbeatPrevButton.setBounds (r.removeFromLeft (30)); r.removeFromLeft (4);
+        downbeatNextButton.setBounds (r.removeFromLeft (30)); r.removeFromLeft (6);
+        downbeatAutoButton.setBounds (r.removeFromLeft (r.getWidth() / 2 - 3)); r.removeFromLeft (6);
         halfBeatButton.setBounds (r);
     }
     {
         auto r = labelled (tempoOctaveLabel);
-        halveButton.setBounds (r.removeFromLeft (36)); r.removeFromLeft (4);
-        doubleButton.setBounds (r.removeFromLeft (36)); r.removeFromLeft (8);
-        const int w = (r.getWidth() - 4) / 2;
-        undoButton.setBounds (r.removeFromLeft (w)); r.removeFromLeft (4);
-        redoButton.setBounds (r);
+        halveButton.setBounds (r.removeFromLeft (44)); r.removeFromLeft (4);
+        doubleButton.setBounds (r.removeFromLeft (44));
     }
     gridInfoLabel.setBounds (row (34));
-    editHintLabel.setBounds (row (30));
     endSection();
 
-    // PLAYBACK
+    // PLAYBACK: three knobs, then switches
     beginSection ("PLAYBACK");
     {
-        auto r = labelled (musicLabel);
-        muteToggle.setBounds (r.removeFromRight (62));
-        musicSlider.setBounds (r);
+        auto r = row (96);
+        const int w = r.getWidth() / 3;
+        for (auto [label, knob] : { std::pair<juce::Label*, juce::Slider*> { &musicLabel, &musicSlider },
+                                    { &clickLabel, &clickSlider }, { &speedLabel, &speedSlider } })
+        {
+            auto col = r.removeFromLeft (w);
+            label->setBounds (col.removeFromTop (16));
+            knob->setBounds (col);
+        }
     }
-    clickSlider.setBounds (labelled (clickLabel));
     {
         auto r = row (22);
-        metronomeToggle.setBounds (r.removeFromLeft (r.getWidth() / 2 - 10));
+        const int w = r.getWidth() / 3;
+        muteToggle.setBounds (r.removeFromLeft (w));
+        metronomeToggle.setBounds (r.removeFromLeft (w));
         accentToggle.setBounds (r);
     }
-    speedSlider.setBounds (labelled (speedLabel));
     endSection();
 
     // EXPORT
     beginSection ("EXPORT");
     {
         auto r = labelled (preCountLabel);
-        preCountBox.setBounds (r.removeFromLeft (120));
+        preCountBox.setBounds (r.removeFromLeft (124));
     }
     preCountInfoLabel.setBounds (row (18));
     {
         auto r = labelled (ppqLabel);
-        ppqBox.setBounds (r.removeFromLeft (120));
+        ppqBox.setBounds (r.removeFromLeft (124));
     }
     clickTrackToggle.setBounds (row (22));
     markersToggle.setBounds (row (22));
+    exportMidiButton.setBounds (row (32));
     {
-        auto r = row (32);
-        exportCsvButton.setBounds (r.removeFromRight (64));
+        auto r = row (28);
+        exportCsvButton.setBounds (r.removeFromRight (70));
         r.removeFromRight (6);
-        exportMidiButton.setBounds (r);
+        exportClickButton.setBounds (r);
     }
-    exportClickButton.setBounds (row (28));
     padFolderButton.setBounds (row (28));
     endSection();
 
@@ -657,17 +853,42 @@ void MainComponent::layoutSidePanel()
 void MainComponent::paintSidePanel (juce::Graphics& g)
 {
     g.fillAll (theme::panel);
-    g.setColour (theme::outline);
+    g.setColour (juce::Colours::black.withAlpha (0.5f));
     g.fillRect (0, 0, 1, side.getHeight());
 
-    for (auto& [title, r] : sections)
+    for (int i = 0; i < (int) sections.size(); ++i)
     {
-        auto box = r.expanded (8, 4).toFloat();
-        g.setColour (theme::background.withAlpha (0.55f));
-        g.fillRoundedRectangle (box, 8.0f);
-        g.setColour (theme::textDim);
-        g.setFont (juce::Font (juce::FontOptions (11.5f, juce::Font::bold)).withExtraKerningFactor (0.12f));
-        g.drawText (title, r.getX(), r.getY() - 2, r.getWidth(), 20, juce::Justification::centredLeft);
+        const auto& sec = sections[(size_t) i];
+        auto card = sec.header.getUnion (sec.body).toFloat().reduced (0.0f, 1.0f);
+
+        // floating card
+        g.setGradientFill (juce::ColourGradient (theme::panelRaised.withAlpha (0.55f), 0.0f, card.getY(),
+                                                 theme::panelRaised.withAlpha (0.30f), 0.0f, card.getBottom(), false));
+        g.fillRoundedRectangle (card, 8.0f);
+        g.setColour (juce::Colours::white.withAlpha (0.04f));
+        g.drawLine (card.getX() + 8.0f, card.getY() + 1.0f, card.getRight() - 8.0f, card.getY() + 1.0f, 1.0f);
+        g.setColour (theme::outline.withAlpha (0.8f));
+        g.drawRoundedRectangle (card, 8.0f, 1.0f);
+
+        // header: chevron + title
+        const bool hot = side.hoveredHeader == i;
+        auto h = sec.header.toFloat().reduced (12.0f, 0.0f);
+        juce::Path chevron;
+        const float cx = h.getX() + 4.0f, cy = h.getCentreY();
+        if (sec.collapsed) { chevron.startNewSubPath (cx - 2.0f, cy - 4.0f); chevron.lineTo (cx + 2.5f, cy); chevron.lineTo (cx - 2.0f, cy + 4.0f); }
+        else               { chevron.startNewSubPath (cx - 4.0f, cy - 2.0f); chevron.lineTo (cx, cy + 2.5f); chevron.lineTo (cx + 4.0f, cy - 2.0f); }
+        g.setColour (hot ? theme::text : theme::textDim);
+        g.strokePath (chevron, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+        g.setColour (hot ? theme::text : theme::textDim.brighter (0.2f));
+        g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)).withExtraKerningFactor (0.16f));
+        g.drawText (sec.title, h.withTrimmedLeft (16.0f), juce::Justification::centredLeft, false);
+
+        if (! sec.collapsed)
+        {
+            g.setColour (theme::outline.withAlpha (0.6f));
+            g.fillRect (juce::Rectangle<float> (card.getX() + 10.0f, sec.header.toFloat().getBottom() - 2.0f, card.getWidth() - 20.0f, 1.0f));
+        }
     }
 }
 
@@ -686,20 +907,15 @@ void MainComponent::timerCallback()
     }
 
     playButton.setIcon (engine.isPlaying() ? IconButton::Icon::pause : IconButton::Icon::play);
-    timeLabel.setText (formatTime (pos), juce::dontSendNotification);
-
     if (! shownGrid.isEmpty())
     {
         const auto p = shownGrid.positionAt (pos, shownLayout);
-        const juce::String prefix (pos < timelineOffset() ? "Count-in  " : "");
-        barBeatLabel.setText (p.valid ? prefix + "Bar " + juce::String (p.bar) + "  Beat " + juce::String (p.beat) : juce::String ("-"),
-                              juce::dontSendNotification);
-        bpmLabel.setText (juce::String (shownGrid.bpmAtTime (pos), 2) + " BPM", juce::dontSendNotification);
+        readout.setValues (formatTime (pos), p.valid ? juce::String (p.bar) : "-", p.valid ? juce::String (p.beat) : "-",
+                           juce::String (shownGrid.bpmAtTime (pos), 2), pos < timelineOffset());
     }
     else
     {
-        barBeatLabel.setText ({}, juce::dontSendNotification);
-        bpmLabel.setText ({}, juce::dontSendNotification);
+        readout.setValues (formatTime (pos), "-", "-", "-", false);
     }
 
     if (busy)
@@ -822,10 +1038,10 @@ void MainComponent::onAudioLoaded (std::shared_ptr<juce::AudioBuffer<float>> buf
     zoomToFit();
 
     const double dur = buffer->getNumSamples() / rate;
-    fileLabel.setText (file.getFileName() + "    " + formatTime (dur) + "  -  " + juce::String (rate / 1000.0, 1)
-                           + " kHz  -  " + (buffer->getNumChannels() > 1 ? "stereo" : "mono"),
-                       juce::dontSendNotification);
-    fileLabel.setColour (juce::Label::textColourId, theme::text);
+    fileLabel.setText (file.getFileNameWithoutExtension(), juce::dontSendNotification);
+    fileInfoLabel.setText (file.getFileExtension().substring (1).toUpperCase() + "   " + formatTime (dur) + "   "
+                               + juce::String (rate / 1000.0, 1) + " kHz   " + (buffer->getNumChannels() > 1 ? "stereo" : "mono"),
+                           juce::dontSendNotification);
     getTopLevelComponent()->setName ("Beat It - " + file.getFileName());
 
     setStatus ("Loaded " + file.getFileName());
@@ -1552,8 +1768,12 @@ void MainComponent::setBusy (bool isBusy, const juce::String& message)
 
 void MainComponent::setStatus (const juce::String& message, bool isError)
 {
+    statusText = message;
+    statusIsError = isError;
     statusLabel.setText (message, juce::dontSendNotification);
-    statusLabel.setColour (juce::Label::textColourId, isError ? theme::danger : theme::textDim);
+    statusLabel.getProperties().set ("role", isError ? "error" : "dim");
+    statusLabel.repaint();
+    repaint (0, getHeight() - 28, 40, 28);   // status dot
 }
 
 void MainComponent::updateInfoLabels()
@@ -1728,6 +1948,7 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             item (menuPadFolder, "Pad audio folder with pre-count...", {}, hasGrid && currentPreCount().isActive() && ! busy);
             m.addSeparator();
             item (menuAudioSettings, "Audio settings...", {});
+            item (menuAutoAnalyze, "Analyze automatically on load", {}, true, autoAnalyzeToggle.getToggleState());
             break;
         case 1:
             item (menuUndo, "Undo", "Cmd+Z", ! undoStack.empty());
@@ -1752,6 +1973,13 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
             item (menuZoomIn, "Zoom in", "+", hasAudio);
             item (menuZoomOut, "Zoom out", "-", hasAudio);
             item (menuZoomFit, "Zoom to fit", "0", hasAudio);
+            m.addSeparator();
+            {
+                juce::PopupMenu themes;
+                themes.addItem (menuThemeStudio, "Studio (dark blue)", true, theme::activeId() == theme::Id::studio);
+                themes.addItem (menuThemeClassic, "Classic", true, theme::activeId() == theme::Id::classic);
+                m.addSubMenu ("Theme", themes);
+            }
             break;
         case 4:
             item (menuShortcuts, "Keyboard shortcuts && tips", {});
@@ -1792,6 +2020,10 @@ void MainComponent::menuItemSelected (int id, int)
         case menuZoomFit:           zoomToFit(); break;
         case menuShortcuts:         showShortcuts(); break;
         case menuAbout:             showAbout(); break;
+        case menuThemeStudio:       applyTheme (theme::Id::studio, true); break;
+        case menuThemeClassic:      applyTheme (theme::Id::classic, true); break;
+        case menuAutoAnalyze:       autoAnalyzeToggle.setToggleState (! autoAnalyzeToggle.getToggleState(), juce::dontSendNotification);
+                                    saveSettings(); break;
         default: break;
     }
 }
@@ -1825,6 +2057,61 @@ void MainComponent::showAbout()
         .withButton ("OK")
         .withAssociatedComponent (this),
         nullptr);
+}
+
+void MainComponent::showExportMenu()
+{
+    const bool hasGrid = ! grid.isEmpty(), hasAudio = audioBuffer != nullptr;
+    const auto pc = currentPreCount();
+
+    juce::PopupMenu m;
+    if (pc.isActive())
+        m.addSectionHeader ("With a " + juce::String (pc.beats) + "-beat pre-count (+" + juce::String (pc.silenceSeconds(), 3) + " s)");
+    auto item = [&m] (int id, const juce::String& text, bool enabled, const char* shortcutUtf8)
+    {
+        juce::PopupMenu::Item i (text);
+        i.itemID = id;
+        i.isEnabled = enabled;
+        i.shortcutKeyDescription = juce::String (juce::CharPointer_UTF8 (shortcutUtf8));
+        m.addItem (i);
+    };
+    item (1, "MIDI tempo map...", hasGrid && ! busy, "\xe2\x8c\x98" "E");
+    item (2, "Metronome audio (WAV)...", hasGrid && hasAudio && ! busy, "\xe2\x8c\xa5\xe2\x8c\x98" "E");
+    item (3, "Beats as CSV...", hasGrid && ! busy, "\xe2\x87\xa7\xe2\x8c\x98" "E");
+    m.addSeparator();
+    item (4, "Pad audio folder with pre-count...", hasGrid && pc.isActive() && ! busy, "");
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&exportButton).withMinimumWidth (exportButton.getWidth()),
+                     [safe] (int r)
+    {
+        if (safe == nullptr) return;
+        switch (r)
+        {
+            case 1: safe->exportMidi(); break;
+            case 2: safe->exportMetronomeAudio(); break;
+            case 3: safe->exportCsv(); break;
+            case 4: safe->padAudioFolder(); break;
+            default: break;
+        }
+    });
+}
+
+void MainComponent::applyTheme (theme::Id id, bool save)
+{
+    theme::set (id);
+    lnf.applyPalette();
+    sendLookAndFeelChange();
+    if (auto* top = getTopLevelComponent())
+        if (auto* w = dynamic_cast<juce::DocumentWindow*> (top))
+            w->setBackgroundColour (theme::background);
+    side.repaint();
+    repaint();
+    if (save)
+    {
+        saveSettings();
+        setStatus (theme::activeId() == theme::Id::classic ? "Theme: Classic" : "Theme: Studio");
+    }
 }
 
 void MainComponent::showShortcuts()

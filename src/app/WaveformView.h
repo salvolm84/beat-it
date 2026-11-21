@@ -59,6 +59,8 @@ private:
     int    beatUnder (float x) const;
     void   showContextMenu (const juce::MouseEvent&);
     void   drawWaveformDirect (juce::Graphics&, juce::Rectangle<int> area);
+    juce::ColourGradient waveGradient (float mid, float half) const;
+    static juce::String formatReadoutTime (double t);
 
     juce::AudioFormatManager formatManager;
     juce::AudioThumbnailCache thumbCache { 2 };
@@ -77,6 +79,7 @@ private:
     bool loopEnabled = false;
 
     int hoveredBeat = -1, selectedBeat = -1;
+    float hoverX = -1.0f;   ///< mouse x for the cursor readout, -1 = outside
     enum class Drag { none, beat, scrub, loop } drag = Drag::none;
     double dragAnchor = 0.0;
     juce::String emptyMessage;

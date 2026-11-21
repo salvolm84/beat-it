@@ -10,13 +10,14 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <optional>
+#include <set>
 
 //==============================================================================
 /** Text button that draws a vector transport icon instead of text. */
 class IconButton : public juce::Button
 {
 public:
-    enum class Icon { play, pause, stop, toStart, loop, follow, zoomIn, zoomOut, zoomFit };
+    enum class Icon { play, pause, stop, toStart, loop, follow, zoomIn, zoomOut, zoomFit, undo, redo };
 
     explicit IconButton (Icon i, const juce::String& tooltip = {}) : juce::Button ({}), icon (i)
     {
@@ -32,14 +33,55 @@ private:
 };
 
 //==============================================================================
-/** Container for the scrollable side panel; painting/layout delegated to the owner. */
+/** Container for the scrollable side panel; painting/layout delegated to the owner.
+    Section headers are clickable (collapse / expand). */
 class SidePanel : public juce::Component
 {
 public:
     std::function<void (juce::Graphics&)> painter;
     std::function<void()> layout;
+    std::function<int (juce::Point<int>)> headerAt;      ///< section index under the point, or -1
+    std::function<void (int)> onHeaderClicked;
+    int hoveredHeader = -1;
+
     void paint (juce::Graphics& g) override  { if (painter) painter (g); }
     void resized() override                  { if (layout) layout(); }
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        const int h = headerAt ? headerAt (e.getPosition()) : -1;
+        if (h != hoveredHeader)
+        {
+            hoveredHeader = h;
+            setMouseCursor (h >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+            repaint();
+        }
+    }
+    void mouseExit (const juce::MouseEvent&) override   { hoveredHeader = -1; setMouseCursor ({}); repaint(); }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        const int h = headerAt ? headerAt (e.getPosition()) : -1;
+        if (h >= 0 && onHeaderClicked) onHeaderClicked (h);
+    }
+};
+
+//==============================================================================
+/** Transport readout: time, bar, beat and tempo in a display panel. */
+class ReadoutDisplay : public juce::Component
+{
+public:
+    void setValues (const juce::String& time, const juce::String& bar, const juce::String& beat,
+                    const juce::String& bpm, bool countIn)
+    {
+        if (time == timeText && bar == barText && beat == beatText && bpm == bpmText && countIn == inCountIn)
+            return;
+        timeText = time; barText = bar; beatText = beat; bpmText = bpm; inCountIn = countIn;
+        repaint();
+    }
+    void paint (juce::Graphics&) override;
+
+private:
+    juce::String timeText { "0:00.000" }, barText { "-" }, beatText { "-" }, bpmText { "-" };
+    bool inCountIn = false;
 };
 
 //==============================================================================
@@ -138,6 +180,9 @@ private:
     void showAudioSettings();
     void showShortcuts();
     void showAbout();
+    void showExportMenu();
+    void applyTheme (theme::Id id, bool save);
+    void toggleSection (int index);
 
     //==============================================================================
     BeatItLookAndFeel lnf;
@@ -182,9 +227,12 @@ private:
 
     //==============================================================================
     // top bar
-    juce::TextButton openButton { "Open..." }, analyzeButton { "Analyze" }, exportButton { "Export MIDI..." },
+    juce::TextButton openButton { "Open..." }, analyzeButton { "Analyze" },
+                     exportButton { juce::CharPointer_UTF8 ("Export  \xe2\x96\xbe") },
                      audioSettingsButton { "Audio..." };
-    juce::Label fileLabel;
+    IconButton undoButton { IconButton::Icon::undo, "Undo (Cmd+Z)" },
+               redoButton { IconButton::Icon::redo, "Redo (Cmd+Shift+Z)" };
+    juce::Label fileLabel, fileInfoLabel;
 
     WaveformView waveform;
     TempoCurveView tempoView;
@@ -199,12 +247,16 @@ private:
                zoomOutButton { IconButton::Icon::zoomOut, "Zoom out (-)" },
                zoomInButton  { IconButton::Icon::zoomIn, "Zoom in (+)" },
                zoomFitButton { IconButton::Icon::zoomFit, "Zoom to fit (0)" };
-    juce::Label timeLabel, barBeatLabel, bpmLabel;
+    ReadoutDisplay readout;
 
     // side panel
     juce::Viewport sideViewport;
     SidePanel side;
-    std::vector<std::pair<juce::String, juce::Rectangle<int>>> sections;
+    struct Section { juce::String title; juce::Rectangle<int> header, body; bool collapsed = false; };
+    std::vector<Section> sections;
+    std::set<juce::String> collapsedSections;
+    juce::String statusText;
+    bool statusIsError = false;
 
     juce::Label rangeLabel, smoothingLabel, offsetLabel;
     juce::Slider rangeSlider { juce::Slider::TwoValueHorizontal, juce::Slider::NoTextBox };
@@ -213,21 +265,21 @@ private:
                        silenceToggle { "Ignore silent intro / outro" }, constantToggle { "Constant tempo (straight grid)" },
                        autoAnalyzeToggle { "Analyze automatically on load" };
 
-    juce::Label timeSigLabel, downbeatLabel, tempoOctaveLabel, gridInfoLabel, editHintLabel;
+    juce::Label timeSigLabel, downbeatLabel, tempoOctaveLabel, gridInfoLabel;
     juce::ComboBox numeratorBox, denominatorBox;
     juce::TextButton downbeatPrevButton { "<" }, downbeatNextButton { ">" }, downbeatAutoButton { "Auto" },
                      halfBeatButton { juce::CharPointer_UTF8 ("\xc2\xbd beat") },
-                     doubleButton { "x2" }, halveButton { "/2" }, undoButton { "Undo" }, redoButton { "Redo" };
+                     doubleButton { juce::CharPointer_UTF8 ("\xc3\x97" "2") }, halveButton { juce::CharPointer_UTF8 ("\xc3\xb7" "2") };
 
     juce::Label musicLabel, clickLabel, speedLabel;
     juce::Slider musicSlider, clickSlider, speedSlider;
-    juce::ToggleButton muteToggle { "Mute" }, metronomeToggle { "Metronome" }, accentToggle { "Accent bar starts" };
+    juce::ToggleButton muteToggle { "Mute" }, metronomeToggle { "Click" }, accentToggle { "Accent" };
 
     juce::Label ppqLabel, preCountLabel, preCountInfoLabel;
     juce::ComboBox ppqBox, preCountBox;
     juce::ToggleButton clickTrackToggle { "Include click note track" }, markersToggle { "Include bar markers" };
     juce::TextButton exportMidiButton { "Export MIDI tempo map..." }, exportCsvButton { "CSV..." },
-                     exportClickButton { "Export metronome audio..." },
+                     exportClickButton { "Metronome WAV..." },
                      padFolderButton { "Pad audio folder with pre-count..." };
 
     // status bar

@@ -75,7 +75,7 @@ float TempoCurveView::bpmToY (double bpm) const noexcept
 
 void TempoCurveView::paint (juce::Graphics& g)
 {
-    g.fillAll (theme::panel);
+    theme::fillDisplay (g, getLocalBounds().toFloat());
 
     // horizontal grid
     const double span = bpmHi - bpmLo;
@@ -85,11 +85,24 @@ void TempoCurveView::paint (juce::Graphics& g)
     for (double b = std::ceil (bpmLo / step) * step; b <= bpmHi; b += step)
     {
         const float y = bpmToY (b);
-        g.setColour (juce::Colours::white.withAlpha (0.06f));
+        g.setColour (theme::grid);
         g.fillRect (juce::Rectangle<float> ((float) axisWidth, y, (float) getWidth(), 1.0f));
-        g.setColour (theme::textDim);
-        g.drawText (juce::String ((int) b), juce::Rectangle<float> (4.0f, y - 7.0f, (float) axisWidth - 8.0f, 14.0f), juce::Justification::right, false);
     }
+
+    // axis labels go on top of the curve, on a dark backing so they stay readable
+    auto drawAxisLabels = [&]
+    {
+        g.setFont (juce::FontOptions (11.0f));
+        for (double b = std::ceil (bpmLo / step) * step; b <= bpmHi; b += step)
+        {
+            const float y = bpmToY (b);
+            const auto r = juce::Rectangle<float> (4.0f, y - 7.0f, (float) axisWidth - 8.0f, 14.0f);
+            g.setColour (theme::displayBottom.withAlpha (0.75f));
+            g.fillRoundedRectangle (r.withTrimmedLeft (r.getWidth() - 26.0f).expanded (2.0f, 0.0f), 3.0f);
+            g.setColour (theme::textDim.withAlpha (0.9f));
+            g.drawText (juce::String ((int) b), r, juce::Justification::right, false);
+        }
+    };
 
     if (grid != nullptr && grid->beats.size() >= 2)
     {
@@ -121,12 +134,13 @@ void TempoCurveView::paint (juce::Graphics& g)
         {
             fill.lineTo (line.getCurrentPosition().x, bottom);
             fill.closeSubPath();
-            g.setGradientFill (juce::ColourGradient (theme::accentAlt.withAlpha (0.25f), 0.0f, 0.0f,
-                                                     theme::accentAlt.withAlpha (0.02f), 0.0f, bottom, false));
+            const auto curve = theme::glow() > 0.0f ? theme::accent : theme::accentAlt;
+            g.setGradientFill (juce::ColourGradient (curve.withAlpha (0.28f), 0.0f, 0.0f,
+                                                     curve.withAlpha (0.0f), 0.0f, bottom, false));
             g.fillPath (fill);
-            g.setColour (theme::accentAlt);
-            g.strokePath (line, juce::PathStrokeType (1.6f));
+            theme::glowStroke (g, line, curve, 1.6f);
         }
+        drawAxisLabels();
 
         // hover readout
         if (hoverX >= 0.0f)
@@ -136,14 +150,23 @@ void TempoCurveView::paint (juce::Graphics& g)
             if (bi >= 0 && bi + 1 < (int) beats.size())
             {
                 const double bpm = grid->bpmOfInterval (bi);
-                g.setColour (juce::Colours::white.withAlpha (0.3f));
+                g.setColour (theme::text.withAlpha (0.2f));
                 g.fillRect (juce::Rectangle<float> (hoverX, 0.0f, 1.0f, (float) getHeight()));
 
+                const float y = bpmToY (bpm);
+                const auto dot = juce::Rectangle<float> (8.0f, 8.0f).withCentre ({ hoverX, y });
+                g.setColour (theme::displayBottom);
+                g.fillEllipse (dot);
+                g.setColour (theme::glow() > 0.0f ? theme::accent : theme::accentAlt);
+                g.drawEllipse (dot, 1.8f);
+
                 const juce::String txt = juce::String (bpm, 2) + " BPM";
-                auto box = juce::Rectangle<float> (hoverX + 6.0f, 4.0f, 86.0f, 18.0f);
-                if (box.getRight() > (float) getWidth()) box.setX (hoverX - 92.0f);
-                g.setColour (theme::panelRaised.withAlpha (0.95f));
+                auto box = juce::Rectangle<float> (hoverX + 8.0f, 5.0f, 88.0f, 20.0f);
+                if (box.getRight() > (float) getWidth()) box.setX (hoverX - 96.0f);
+                g.setColour (theme::panelRaised.withAlpha (0.92f));
                 g.fillRoundedRectangle (box, 4.0f);
+                g.setColour (theme::outline.brighter (0.2f));
+                g.drawRoundedRectangle (box, 4.0f, 1.0f);
                 g.setColour (theme::text);
                 g.drawText (txt, box, juce::Justification::centred, false);
             }
@@ -153,14 +176,16 @@ void TempoCurveView::paint (juce::Graphics& g)
     {
         g.setColour (theme::textDim);
         g.drawText ("Tempo curve appears after analysis", getLocalBounds(), juce::Justification::centred, false);
+        drawAxisLabels();
     }
 
     // playhead
-    g.setColour (theme::playhead.withAlpha (0.8f));
-    g.fillRect (juce::Rectangle<float> (timeToX (playhead) - 0.5f, 0.0f, 1.0f, (float) getHeight()));
+    theme::glowLine (g, juce::Rectangle<float> (timeToX (playhead) - 0.6f, 0.0f, 1.2f, (float) getHeight()),
+                     theme::playhead.withAlpha (0.85f), 4.0f);
 
-    g.setColour (theme::outline);
-    g.drawRect (getLocalBounds().removeFromTop (1));
+    g.setColour (theme::textDim.withAlpha (0.7f));
+    g.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)).withExtraKerningFactor (0.12f));
+    g.drawText ("TEMPO", juce::Rectangle<float> ((float) axisWidth + 8.0f, 4.0f, 80.0f, 14.0f), juce::Justification::left, false);
 }
 
 void TempoCurveView::mouseDown (const juce::MouseEvent& e)  { if (onSeek) onSeek (std::max (0.0, xToTime ((float) e.x))); }
